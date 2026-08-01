@@ -37,7 +37,13 @@ jobs:
           swift --version
 
       - name: Build app
-        run: zsh build.sh
+        run: |
+          sh -n router/openwrt/router-status-api.cgi
+          sh -n router/openwrt/router-events-api.cgi
+          sh -n router/openwrt/router-reboot-api.cgi
+          sh -n router/openwrt/install-router-status-api.sh
+          sh -n router/openwrt/uninstall-router-status-api.sh
+          zsh build.sh
 
       - name: Verify bundle
         run: |

@@ -6,7 +6,7 @@
 
 | 项目 | 平台 | 说明 | CI/CD |
 | --- | --- | --- | --- |
-| [`macos-router-status-widget`](./macos-router-status-widget/) | macOS | 通过 SSH 展示 OpenWrt WAN、CPU、内存和运行状态的桌面小组件 | macOS 构建产物与标签发布 |
+| [`macos-router-status-widget`](./macos-router-status-widget/) | macOS + OpenWrt | 展示 WAN、CPU、内存和温度，并提供受限重启操作的桌面小组件 | macOS构建产物与标签发布 |
 
 ## 新增项目约定
 

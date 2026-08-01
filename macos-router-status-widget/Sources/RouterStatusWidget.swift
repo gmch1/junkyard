@@ -10,20 +10,52 @@ private struct Counters {
     let sampledAt: Date
 }
 
+private struct APISnapshot: Decodable {
+    let version: Int
+    let cpuTotal: UInt64
+    let cpuIdle: UInt64
+    let memTotalKb: Double
+    let memAvailableKb: Double
+    let rxBytes: UInt64
+    let txBytes: UInt64
+    let linkMbps: Int
+    let uptimeSeconds: Double
+    let temperatureC: Double?
+}
+
+private final class LightGlassCardView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .underWindowBackground
+        blendingMode = .behindWindow
+        state = .active
+        appearance = NSAppearance(named: .aqua)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
+        layer?.cornerRadius = 26
+        layer?.borderWidth = 0.75
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.46).cgColor
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
 private final class StatusCardController: NSWindowController {
     private let statusDot = NSView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
     private let statusLabel = NSTextField(labelWithString: "正在连接…")
-    private let wanBadge = NSTextField(labelWithString: "WAN --")
-    private let updatedLabel = NSTextField(labelWithString: "")
     private let downloadValue = NSTextField(labelWithString: "--")
     private let uploadValue = NSTextField(labelWithString: "--")
     private let cpuValue = NSTextField(labelWithString: "--")
     private let memoryValue = NSTextField(labelWithString: "--")
-    private let uptimeValue = NSTextField(labelWithString: "--")
+    private let temperatureValue = NSTextField(labelWithString: "--")
+    private let wanValue = NSTextField(labelWithString: "--")
+    private let rebootButton = NSButton()
+    var onRebootRequested: (() -> Void)?
 
     init() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 252),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 192),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -44,13 +76,7 @@ private final class StatusCardController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     private func buildContent(in panel: NSPanel) {
-        let cardView = NSView()
-        cardView.wantsLayer = true
-        cardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.96).cgColor
-        cardView.layer?.cornerRadius = 28
-        cardView.layer?.borderWidth = 1
-        cardView.layer?.borderColor = NSColor.separatorColor.cgColor
-        cardView.layer?.masksToBounds = true
+        let cardView = LightGlassCardView()
 
         statusDot.wantsLayer = true
         statusDot.layer?.cornerRadius = 4
@@ -62,9 +88,10 @@ private final class StatusCardController: NSWindowController {
         ])
 
         let heading = NSTextField(labelWithString: "RAX3000M")
-        heading.font = .systemFont(ofSize: 17, weight: .bold)
+        heading.font = .systemFont(ofSize: 17, weight: .semibold)
+        heading.textColor = .labelColor
 
-        statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        statusLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
         statusLabel.textColor = .secondaryLabelColor
 
         let status = NSStackView(views: [statusDot, statusLabel])
@@ -72,32 +99,35 @@ private final class StatusCardController: NSWindowController {
         status.alignment = .centerY
         status.spacing = 6
 
-        let identity = NSStackView(views: [heading, status])
-        identity.orientation = .vertical
-        identity.alignment = .leading
-        identity.spacing = 1
-
-        wanBadge.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        wanBadge.alignment = .center
-        wanBadge.textColor = .secondaryLabelColor
-        wanBadge.wantsLayer = true
-        wanBadge.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.10).cgColor
-        wanBadge.layer?.cornerRadius = 10
-        wanBadge.translatesAutoresizingMaskIntoConstraints = false
+        rebootButton.image = NSImage(
+            systemSymbolName: "arrow.clockwise",
+            accessibilityDescription: "重启路由器"
+        )
+        rebootButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        rebootButton.isBordered = false
+        rebootButton.contentTintColor = .secondaryLabelColor
+        rebootButton.toolTip = "重启路由器"
+        rebootButton.target = self
+        rebootButton.action = #selector(requestReboot)
+        rebootButton.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            wanBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
-            wanBadge.heightAnchor.constraint(equalToConstant: 24)
+            rebootButton.widthAnchor.constraint(equalToConstant: 22),
+            rebootButton.heightAnchor.constraint(equalToConstant: 22)
         ])
 
-        let header = NSStackView(views: [identity, wanBadge])
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let header = NSStackView(views: [heading, headerSpacer, status, rebootButton])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.distribution = .fill
-        wanBadge.setContentHuggingPriority(.required, for: .horizontal)
+        header.spacing = 7
+        heading.setContentHuggingPriority(.required, for: .horizontal)
+        status.setContentHuggingPriority(.required, for: .horizontal)
 
         let rates = NSStackView(views: [
-            makeRateTile(title: "实时下载", arrow: "↓", color: .systemBlue, value: downloadValue),
-            makeRateTile(title: "实时上传", arrow: "↑", color: .systemGreen, value: uploadValue)
+            makeRateTile(title: "实时下载", arrow: "↓", value: downloadValue),
+            makeRateTile(title: "实时上传", arrow: "↑", value: uploadValue)
         ])
         rates.orientation = .horizontal
         rates.alignment = .height
@@ -107,19 +137,15 @@ private final class StatusCardController: NSWindowController {
         let metrics = NSStackView(views: [
             makeSmallTile(title: "CPU", value: cpuValue),
             makeSmallTile(title: "内存", value: memoryValue),
-            makeSmallTile(title: "运行时间", value: uptimeValue)
+            makeSmallTile(title: "温度", value: temperatureValue),
+            makeSmallTile(title: "WAN", value: wanValue)
         ])
         metrics.orientation = .horizontal
         metrics.alignment = .height
         metrics.distribution = .fillEqually
         metrics.spacing = 8
 
-        updatedLabel.font = .systemFont(ofSize: 10)
-        updatedLabel.textColor = .tertiaryLabelColor
-        updatedLabel.alignment = .center
-        updatedLabel.stringValue = "每5秒通过SSH刷新"
-
-        let content = NSStackView(views: [header, rates, metrics, updatedLabel])
+        let content = NSStackView(views: [header, rates, metrics])
         content.orientation = .vertical
         content.alignment = .width
         content.spacing = 9
@@ -130,21 +156,22 @@ private final class StatusCardController: NSWindowController {
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
             content.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
-            content.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 15),
-            content.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -11)
+            content.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 14),
+            content.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -13)
         ])
     }
 
-    private func makeRateTile(title: String, arrow: String, color: NSColor,
-                              value: NSTextField) -> NSView {
+    private func makeRateTile(title: String, arrow: String, value: NSTextField) -> NSView {
         let tile = NSView()
         tile.wantsLayer = true
-        tile.layer?.backgroundColor = color.withAlphaComponent(0.11).cgColor
+        tile.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        tile.layer?.borderWidth = 0.5
+        tile.layer?.borderColor = NSColor.white.withAlphaComponent(0.28).cgColor
         tile.layer?.cornerRadius = 18
 
         let caption = NSTextField(labelWithString: "\(arrow)  \(title)")
         caption.font = .systemFont(ofSize: 12, weight: .semibold)
-        caption.textColor = color
+        caption.textColor = NSColor(calibratedRed: 0.18, green: 0.36, blue: 0.50, alpha: 1)
         value.font = .monospacedDigitSystemFont(ofSize: 24, weight: .bold)
         value.textColor = .labelColor
 
@@ -166,13 +193,15 @@ private final class StatusCardController: NSWindowController {
     private func makeSmallTile(title: String, value: NSTextField) -> NSView {
         let tile = NSView()
         tile.wantsLayer = true
-        tile.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.07).cgColor
+        tile.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        tile.layer?.borderWidth = 0.5
+        tile.layer?.borderColor = NSColor.white.withAlphaComponent(0.26).cgColor
         tile.layer?.cornerRadius = 14
 
         let caption = NSTextField(labelWithString: title)
         caption.font = .systemFont(ofSize: 10, weight: .medium)
         caption.textColor = .secondaryLabelColor
-        value.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        value.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
         value.textColor = .labelColor
 
         let stack = NSStackView(views: [caption, value])
@@ -203,20 +232,44 @@ private final class StatusCardController: NSWindowController {
     func setConnected(_ connected: Bool, message: String) {
         statusDot.layer?.backgroundColor = (connected ? NSColor.systemGreen : NSColor.systemRed).cgColor
         statusLabel.stringValue = message
+        if connected { rebootButton.isEnabled = true }
     }
+
+    func setPaused() {
+        statusDot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        statusLabel.stringValue = "后台暂停"
+    }
+
+    func setConnecting() {
+        statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+        statusLabel.stringValue = "正在连接…"
+    }
+
+    func setRebooting() {
+        rebootButton.isEnabled = false
+        statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+        statusLabel.stringValue = "正在重启…"
+    }
+
+    func setRebootFailed(_ message: String) {
+        rebootButton.isEnabled = true
+        statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        statusLabel.stringValue = message
+    }
+
+    @objc private func requestReboot() { onRebootRequested?() }
 
     func update(downloadRate: Double, uploadRate: Double, cpuPercent: Double,
                 memoryPercent: Double, memoryUsed: Double, memoryTotal: Double,
-                linkSpeed: Int, uptimeSeconds: Double) {
+                linkSpeed: Int, uptimeSeconds: Double, temperatureC: Double?) {
         downloadValue.stringValue = Self.rate(downloadRate)
         uploadValue.stringValue = Self.rate(uploadRate)
         cpuValue.stringValue = String(format: "%.1f%%", cpuPercent)
         memoryValue.stringValue = String(format: "%.1f%%", memoryPercent)
         memoryValue.toolTip = String(format: "已使用 %.0f MB，共 %.0f MB", memoryUsed, memoryTotal)
-        wanBadge.stringValue = "WAN \(Self.link(linkSpeed))"
-        uptimeValue.stringValue = Self.uptime(uptimeSeconds)
-
-        updatedLabel.stringValue = "已更新 · 每5秒通过SSH刷新"
+        temperatureValue.stringValue = temperatureC.map { String(format: "%.1f°C", $0) } ?? "--"
+        wanValue.stringValue = Self.compactLink(linkSpeed)
+        statusLabel.stringValue = "在线 · 运行 \(Self.uptime(uptimeSeconds))"
     }
 
     private static func rate(_ bytesPerSecond: Double) -> String {
@@ -234,6 +287,11 @@ private final class StatusCardController: NSWindowController {
         return speed > 0 ? "\(speed) Mbps" : "--"
     }
 
+    private static func compactLink(_ speed: Int) -> String {
+        if speed >= 1000 { return speed == 1000 ? "1G" : "\(speed / 1000)G" }
+        return speed > 0 ? "\(speed)M" : "--"
+    }
+
     private static func uptime(_ seconds: Double) -> String {
         let totalMinutes = Int(seconds) / 60
         let days = totalMinutes / 1440
@@ -245,123 +303,334 @@ private final class StatusCardController: NSWindowController {
     }
 }
 
-private final class RouterMonitor {
-    private let host: String
-    private let wanInterface: String
+private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let endpoint: URL
+    private let token: String?
+    private let controlSession: URLSession
     private let card: StatusCardController
-    private var timer: Timer?
+    private lazy var streamSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 3_700
+        configuration.httpMaximumConnectionsPerHost = 1
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+    }()
+    private var streamTask: URLSessionDataTask?
+    private var streamBuffer = Data()
+    private var shouldReceiveEvents = false
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var workspaceObservers: [NSObjectProtocol] = []
     private var previous: Counters?
-    private var polling = false
+    private var rebooting = false
     var onRateUpdate: ((Double, Double) -> Void)?
 
     init(card: StatusCardController) {
         self.card = card
         let defaults = UserDefaults.standard
-        let configuredHost = defaults.string(forKey: "RouterHost") ?? "root@192.168.31.1"
-        let configuredInterface = defaults.string(forKey: "WANInterface") ?? "eth1"
-        self.host = configuredHost.range(
-            of: #"^[A-Za-z0-9._%+:-]+@[A-Za-z0-9.:[\]-]+$"#,
-            options: .regularExpression
-        ) != nil ? configuredHost : "root@192.168.31.1"
-        self.wanInterface = configuredInterface.range(
-            of: #"^[A-Za-z0-9_.:-]+$"#,
-            options: .regularExpression
-        ) != nil ? configuredInterface : "eth1"
+        let defaultURL = URL(string: "http://192.168.31.1:8099/cgi-bin/status")!
+        if let configured = defaults.string(forKey: "APIURL"),
+           let url = URL(string: configured),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           url.host != nil {
+            self.endpoint = url
+        } else {
+            self.endpoint = defaultURL
+        }
+
+        let supportDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+        let tokenURL = supportDirectory?
+            .appendingPathComponent("RouterStatusWidget", isDirectory: true)
+            .appendingPathComponent("api-token", isDirectory: false)
+        self.token = tokenURL
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 4
+        configuration.timeoutIntervalForResource = 5
+        configuration.httpMaximumConnectionsPerHost = 2
+        self.controlSession = URLSession(configuration: configuration)
+        super.init()
+    }
+
+    deinit {
+        reconnectWorkItem?.cancel()
+        workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        streamSession.invalidateAndCancel()
+        controlSession.invalidateAndCancel()
     }
 
     func start() {
-        poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.poll()
-        }
-    }
-
-    func poll() {
-        guard !polling else { return }
-        polling = true
-
-        let command = "awk 'NR==1 {print \"cpu\",$2,$3,$4,$5,$6,$7,$8}' /proc/stat; "
-            + "awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {print \"mem\",t,a}' /proc/meminfo; "
-            + "printf 'net '; tr -d '\\n' < /sys/class/net/\(wanInterface)/statistics/rx_bytes; "
-            + "printf ' '; tr -d '\\n' < /sys/class/net/\(wanInterface)/statistics/tx_bytes; "
-            + "printf ' '; cat /sys/class/net/\(wanInterface)/speed; "
-            + "awk '{print \"uptime\",$1}' /proc/uptime"
-
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = [
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=3",
-            "-o", "StrictHostKeyChecking=accept-new",
-            host, command
+        let center = NSWorkspace.shared.notificationCenter
+        let names: [Notification.Name] = [
+            NSWorkspace.didActivateApplicationNotification,
+            NSWorkspace.activeSpaceDidChangeNotification,
+            NSWorkspace.didWakeNotification
         ]
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        process.terminationHandler = { [weak self] task in
-            let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.polling = false
-                if task.terminationStatus == 0 {
-                    self.consume(output)
-                } else {
-                    let detail = error.contains("Permission denied") ? "SSH免密失败" : "路由器离线"
-                    self.card.setConnected(false, message: detail)
-                }
+        workspaceObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.reevaluateWorkspaceSoon()
             }
         }
-
-        do {
-            try process.run()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 4.5) {
-                if process.isRunning { process.terminate() }
+        workspaceObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendEventStream()
             }
-        } catch {
-            polling = false
-            card.setConnected(false, message: "无法启动SSH")
+        )
+        updateStreamingState()
+    }
+
+    func refresh() {
+        if isDesktopActive {
+            restartEventStream()
+        } else {
+            fetchOneSnapshot()
         }
     }
 
-    private func consume(_ text: String) {
-        var cpuValues: [UInt64] = []
-        var memoryTotalKB: Double = 0
-        var memoryAvailableKB: Double = 0
-        var rxBytes: UInt64 = 0
-        var txBytes: UInt64 = 0
-        var linkSpeed = 0
-        var uptimeSeconds: Double = 0
-
-        for line in text.split(separator: "\n") {
-            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard let kind = fields.first else { continue }
-            switch kind {
-            case "cpu": cpuValues = fields.dropFirst().compactMap { UInt64($0) }
-            case "mem" where fields.count >= 3:
-                memoryTotalKB = Double(fields[1]) ?? 0
-                memoryAvailableKB = Double(fields[2]) ?? 0
-            case "net" where fields.count >= 4:
-                rxBytes = UInt64(fields[1]) ?? 0
-                txBytes = UInt64(fields[2]) ?? 0
-                linkSpeed = Int(fields[3]) ?? 0
-            case "uptime" where fields.count >= 2:
-                uptimeSeconds = Double(fields[1]) ?? 0
-            default: break
-            }
+    private var isDesktopActive: Bool {
+        guard let identifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
+            return false
         }
+        return identifier == "com.apple.finder" || identifier == Bundle.main.bundleIdentifier
+    }
 
-        guard cpuValues.count >= 7, memoryTotalKB > 0, rxBytes > 0 else {
-            card.setConnected(false, message: "数据格式异常")
+    private func reevaluateWorkspaceSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.updateStreamingState()
+        }
+    }
+
+    private func updateStreamingState() {
+        if isDesktopActive {
+            shouldReceiveEvents = true
+            startEventStream()
+        } else {
+            suspendEventStream()
+        }
+    }
+
+    private func startEventStream() {
+        guard shouldReceiveEvents, streamTask == nil else { return }
+        guard let token else {
+            card.setConnected(false, message: "缺少API Token")
             return
         }
 
-        let idle = cpuValues[3] + cpuValues[4]
-        let total = cpuValues.reduce(0, +)
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        streamBuffer.removeAll(keepingCapacity: true)
+        previous = nil
+
+        let eventsEndpoint = endpoint
+            .deletingLastPathComponent()
+            .appendingPathComponent("events", isDirectory: false)
+        var request = URLRequest(url: eventsEndpoint)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+        card.setConnecting()
+        let task = streamSession.dataTask(with: request)
+        streamTask = task
+        task.resume()
+    }
+
+    private func suspendEventStream() {
+        shouldReceiveEvents = false
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        let task = streamTask
+        streamTask = nil
+        task?.cancel()
+        streamBuffer.removeAll(keepingCapacity: false)
+        previous = nil
+        card.setPaused()
+    }
+
+    private func restartEventStream() {
+        shouldReceiveEvents = true
+        let task = streamTask
+        streamTask = nil
+        task?.cancel()
+        streamBuffer.removeAll(keepingCapacity: true)
+        previous = nil
+        startEventStream()
+    }
+
+    private func scheduleReconnect() {
+        guard shouldReceiveEvents else { return }
+        reconnectWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in self?.startEventStream() }
+        reconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard dataTask === streamTask else {
+            completionHandler(.cancel)
+            return
+        }
+        guard let http = response as? HTTPURLResponse else {
+            streamTask = nil
+            card.setConnected(false, message: "SSE响应异常")
+            completionHandler(.cancel)
+            scheduleReconnect()
+            return
+        }
+        guard http.statusCode == 200 else {
+            streamTask = nil
+            card.setConnected(false, message: http.statusCode == 401 ? "Token无效" : "SSE错误 \(http.statusCode)")
+            completionHandler(.cancel)
+            scheduleReconnect()
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard dataTask === streamTask else { return }
+        streamBuffer.append(data)
+        let separator = Data([0x0A, 0x0A])
+        while let range = streamBuffer.range(of: separator) {
+            let eventData = streamBuffer.subdata(in: streamBuffer.startIndex..<range.lowerBound)
+            streamBuffer.removeSubrange(streamBuffer.startIndex..<range.upperBound)
+            consumeEvent(eventData)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard task === streamTask else { return }
+        streamTask = nil
+        streamBuffer.removeAll(keepingCapacity: true)
+        previous = nil
+        if shouldReceiveEvents {
+            card.setConnecting()
+            scheduleReconnect()
+        }
+    }
+
+    private func consumeEvent(_ eventData: Data) {
+        guard let event = String(data: eventData, encoding: .utf8) else { return }
+        let payload = event
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("data:") }
+            .map { String($0.dropFirst(5)).trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+        guard !payload.isEmpty,
+              let data = payload.data(using: .utf8),
+              let snapshot = decodeSnapshot(data) else { return }
+        consume(snapshot)
+    }
+
+    private func fetchOneSnapshot() {
+        guard let token else {
+            card.setConnected(false, message: "缺少API Token")
+            return
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 4
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        controlSession.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard error == nil,
+                      let http = response as? HTTPURLResponse,
+                      http.statusCode == 200,
+                      let data,
+                      let snapshot = self.decodeSnapshot(data) else {
+                    self.card.setConnected(false, message: "刷新失败")
+                    return
+                }
+                self.consume(snapshot)
+            }
+        }.resume()
+    }
+
+    private func decodeSnapshot(_ data: Data) -> APISnapshot? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let snapshot = try? decoder.decode(APISnapshot.self, from: data),
+              snapshot.version == 1,
+              snapshot.memTotalKb > 0 else { return nil }
+        return snapshot
+    }
+
+    func reboot() {
+        guard !rebooting else { return }
+        guard let token else {
+            card.setRebootFailed("缺少API Token")
+            return
+        }
+
+        let rebootEndpoint = endpoint
+            .deletingLastPathComponent()
+            .appendingPathComponent("reboot", isDirectory: false)
+        var request = URLRequest(url: rebootEndpoint)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 4
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"action":"reboot"}"#.utf8)
+
+        rebooting = true
+        card.setRebooting()
+        controlSession.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if error != nil {
+                    self.rebooting = false
+                    self.card.setRebootFailed("重启请求失败")
+                    return
+                }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 202 else {
+                    self.rebooting = false
+                    self.card.setRebootFailed("重启接口拒绝")
+                    return
+                }
+                self.previous = nil
+                self.card.setRebooting()
+            }
+        }.resume()
+    }
+
+    private func consume(_ snapshot: APISnapshot) {
+        rebooting = false
         let now = Date()
-        let current = Counters(cpuTotal: total, cpuIdle: idle, rxBytes: rxBytes, txBytes: txBytes, sampledAt: now)
+        let current = Counters(
+            cpuTotal: snapshot.cpuTotal,
+            cpuIdle: snapshot.cpuIdle,
+            rxBytes: snapshot.rxBytes,
+            txBytes: snapshot.txBytes,
+            sampledAt: now
+        )
         var cpuPercent = 0.0
         var downloadRate = 0.0
         var uploadRate = 0.0
@@ -382,18 +651,19 @@ private final class RouterMonitor {
         }
         self.previous = current
 
-        let usedKB = memoryTotalKB - memoryAvailableKB
-        let memoryPercent = usedKB / memoryTotalKB * 100
-        card.setConnected(true, message: "已连接")
+        let usedKB = snapshot.memTotalKb - snapshot.memAvailableKb
+        let memoryPercent = usedKB / snapshot.memTotalKb * 100
+        card.setConnected(true, message: "SSE已连接")
         card.update(
             downloadRate: downloadRate,
             uploadRate: uploadRate,
             cpuPercent: cpuPercent,
             memoryPercent: memoryPercent,
             memoryUsed: usedKB / 1024,
-            memoryTotal: memoryTotalKB / 1024,
-            linkSpeed: linkSpeed,
-            uptimeSeconds: uptimeSeconds
+            memoryTotal: snapshot.memTotalKb / 1024,
+            linkSpeed: snapshot.linkMbps,
+            uptimeSeconds: snapshot.uptimeSeconds,
+            temperatureC: snapshot.temperatureC
         )
         onRateUpdate?(downloadRate, uploadRate)
     }
@@ -413,6 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         buildStatusMenu()
         monitor = RouterMonitor(card: card)
+        card.onRebootRequested = { [weak self] in self?.monitor.reboot() }
         monitor.onRateUpdate = { [weak self] down, up in
             self?.statusItem.button?.title = String(format: " ↓%.1f ↑%.1f", down / 1_000_000, up / 1_000_000)
         }
@@ -442,7 +713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { window.orderFrontRegardless() }
     }
 
-    @objc private func refresh() { monitor.poll() }
+    @objc private func refresh() { monitor.refresh() }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 

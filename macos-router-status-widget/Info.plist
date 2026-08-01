@@ -26,5 +26,12 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>连接局域网内的 OpenWrt 路由器以读取只读运行状态。</string>
 </dict>
 </plist>
