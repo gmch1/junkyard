@@ -24,6 +24,8 @@ private struct APISnapshot: Decodable {
 }
 
 private final class LightGlassCardView: NSVisualEffectView {
+    private let roundedMask = CAShapeLayer()
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         material = .underWindowBackground
@@ -36,9 +38,27 @@ private final class LightGlassCardView: NSVisualEffectView {
         layer?.borderWidth = 0.75
         layer?.borderColor = NSColor.white.withAlphaComponent(0.46).cgColor
         layer?.masksToBounds = true
+        roundedMask.fillColor = NSColor.white.cgColor
+        layer?.mask = roundedMask
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        roundedMask.frame = bounds
+        roundedMask.path = CGPath(
+            roundedRect: bounds,
+            cornerWidth: 26,
+            cornerHeight: 26,
+            transform: nil
+        )
+        maskImage = NSImage(size: bounds.size, flipped: false) { rect in
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 26, yRadius: 26).fill()
+            return true
+        }
+    }
 }
 
 private final class StatusCardController: NSWindowController {
