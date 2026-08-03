@@ -1,0 +1,88 @@
+name: macOS Router Status Widget
+
+on:
+  pull_request:
+    paths:
+      - "macos-router-status-widget/**"
+      - ".github/workflows/macos-router-status-widget.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "router-status-v*"
+    paths:
+      - "macos-router-status-widget/**"
+      - ".github/workflows/macos-router-status-widget.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build macOS arm64 app
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos-router-status-widget
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          uname -a
+          xcodebuild -version
+          swift --version
+
+      - name: Build app
+        run: |
+          sh -n router/openwrt/router-status-api.cgi
+          sh -n router/openwrt/router-events-api.cgi
+          sh -n router/openwrt/router-client-counters.sh
+          sh -n router/openwrt/router-reboot-api.cgi
+          sh -n router/openwrt/install-router-status-api.sh
+          sh -n router/openwrt/uninstall-router-status-api.sh
+          zsh build.sh
+
+      - name: Verify bundle
+        run: |
+          test -x build/RouterStatusWidget.app/Contents/MacOS/RouterStatusWidget
+          plutil -lint build/RouterStatusWidget.app/Contents/Info.plist
+          codesign --verify --deep --strict build/RouterStatusWidget.app
+          file build/RouterStatusWidget.app/Contents/MacOS/RouterStatusWidget
+
+      - name: Package app
+        run: ditto -c -k --keepParent build/RouterStatusWidget.app RouterStatusWidget-macos-arm64.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RouterStatusWidget-macos-arm64
+          path: macos-router-status-widget/RouterStatusWidget-macos-arm64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/router-status-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RouterStatusWidget-macos-arm64
+          path: release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          release/RouterStatusWidget-macos-arm64.zip
+          --title "Router Status Widget ${GITHUB_REF_NAME#router-status-v}"
+          --generate-notes
