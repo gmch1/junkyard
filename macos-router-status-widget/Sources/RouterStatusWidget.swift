@@ -198,6 +198,8 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
         cardView.addSubview(content)
         panel.contentView = cardView
         NSLayoutConstraint.activate([
+            traffic.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            traffic.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             content.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
             content.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
             content.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 14),
@@ -232,11 +234,13 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
         trafficTable.dataSource = self
         trafficTable.delegate = self
         trafficTable.headerView = nil
+        trafficTable.style = .plain
         trafficTable.backgroundColor = .clear
         trafficTable.selectionHighlightStyle = .none
         trafficTable.rowHeight = 19
         trafficTable.intercellSpacing = NSSize(width: 6, height: 1)
         trafficTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        trafficTable.autoresizingMask = [.width]
         trafficTable.allowsColumnReordering = false
         trafficTable.allowsColumnResizing = false
         trafficTable.usesAlternatingRowBackgroundColors = false
@@ -250,16 +254,14 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
         scrollView.documentView = trafficTable
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        let header = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
         let deviceHeader = makeTrafficHeaderLabel("设备名称", alignment: .left)
         let downloadHeader = makeTrafficHeaderLabel("下行速度", alignment: .right)
         let uploadHeader = makeTrafficHeaderLabel("上行速度", alignment: .right)
-        downloadHeader.widthAnchor.constraint(equalToConstant: 72).isActive = true
-        uploadHeader.widthAnchor.constraint(equalToConstant: 72).isActive = true
-        let header = NSStackView(views: [deviceHeader, downloadHeader, uploadHeader])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 6
-        header.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(deviceHeader)
+        header.addSubview(downloadHeader)
+        header.addSubview(uploadHeader)
 
         let separator = NSView()
         separator.wantsLayer = true
@@ -272,12 +274,21 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
 
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(equalToConstant: 146),
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 7),
             header.heightAnchor.constraint(equalToConstant: 16),
-            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            uploadHeader.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            uploadHeader.widthAnchor.constraint(equalToConstant: 72),
+            uploadHeader.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            downloadHeader.trailingAnchor.constraint(equalTo: uploadHeader.leadingAnchor, constant: -6),
+            downloadHeader.widthAnchor.constraint(equalToConstant: 72),
+            downloadHeader.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            deviceHeader.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            deviceHeader.trailingAnchor.constraint(equalTo: downloadHeader.leadingAnchor, constant: -6),
+            deviceHeader.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
             separator.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 3),
             separator.heightAnchor.constraint(equalToConstant: 0.5),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
@@ -296,6 +307,7 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
         label.font = .systemFont(ofSize: 9.5, weight: .medium)
         label.textColor = .tertiaryLabelColor
         label.alignment = alignment
+        label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }
 
