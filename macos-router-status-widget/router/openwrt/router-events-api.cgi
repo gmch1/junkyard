@@ -2,9 +2,14 @@
 
 TOKEN_FILE="/etc/router-status-api.token"
 WAN_INTERFACE="eth1"
+CLIENT_COUNTERS_FILE="/www-router-status/client-counters.sh"
 
 if [ -r /etc/router-status-api.interface ]; then
 	IFS= read -r WAN_INTERFACE < /etc/router-status-api.interface
+fi
+
+if [ -r "$CLIENT_COUNTERS_FILE" ]; then
+	. "$CLIENT_COUNTERS_FILE"
 fi
 
 respond_json() {
@@ -39,6 +44,18 @@ if [ -z "$expected_token" ] || [ "$provided_token" != "$expected_token" ]; then
 	exit 0
 fi
 
+case "${QUERY_STRING:-}" in
+	''|'interval=1') sample_interval=1 ;;
+	'interval=5') sample_interval=5 ;;
+	'interval=15') sample_interval=15 ;;
+	'interval=30') sample_interval=30 ;;
+	'interval=60') sample_interval=60 ;;
+	*)
+		respond_json "400 Bad Request" '{"error":"invalid_interval"}'
+		exit 0
+		;;
+esac
+
 case "$WAN_INTERFACE" in
 	*[!A-Za-z0-9_.:-]*|'')
 		respond_json "500 Internal Server Error" '{"error":"invalid_interface"}'
@@ -51,6 +68,11 @@ if [ ! -r "$net_path/statistics/rx_bytes" ]; then
 	respond_json "503 Service Unavailable" '{"error":"wan_interface_unavailable"}'
 	exit 0
 fi
+
+clients_json="[]"
+clients_sampled_at=0
+client_refresh_steps=$(( (3 + sample_interval - 1) / sample_interval ))
+client_samples_until_refresh=0
 
 snapshot() {
 	set -- $(sed -n '1s/^cpu[[:space:]]*//p' /proc/stat)
@@ -79,10 +101,20 @@ snapshot() {
 		temperature_c=$(awk -v value="$temperature_millidegrees" 'BEGIN { printf "%.1f", value / 1000 }')
 		break
 	done
+	if [ "$client_samples_until_refresh" -le 0 ] && command -v client_counters_json >/dev/null 2>&1; then
+		clients_json=$(client_counters_json 2>/dev/null)
+		case "$clients_json" in
+			'['*']') ;;
+			*) clients_json='[]' ;;
+		esac
+		clients_sampled_at="$uptime_seconds"
+		client_samples_until_refresh="$client_refresh_steps"
+	fi
+	client_samples_until_refresh=$((client_samples_until_refresh - 1))
 
-	printf '{"version":1,"cpu_total":%s,"cpu_idle":%s,"mem_total_kb":%s,"mem_available_kb":%s,"rx_bytes":%s,"tx_bytes":%s,"link_mbps":%s,"uptime_seconds":%s,"temperature_c":%s}' \
+	printf '{"version":1,"cpu_total":%s,"cpu_idle":%s,"mem_total_kb":%s,"mem_available_kb":%s,"rx_bytes":%s,"tx_bytes":%s,"link_mbps":%s,"uptime_seconds":%s,"temperature_c":%s,"clients_sampled_at":%s,"clients":%s}' \
 		"$cpu_total" "$cpu_idle" "$mem_total_kb" "$mem_available_kb" \
-		"$rx_bytes" "$tx_bytes" "${link_mbps:--1}" "$uptime_seconds" "$temperature_c"
+		"$rx_bytes" "$tx_bytes" "${link_mbps:--1}" "$uptime_seconds" "$temperature_c" "$clients_sampled_at" "$clients_json"
 }
 
 trap 'exit 0' HUP INT PIPE TERM
@@ -96,10 +128,14 @@ printf 'Connection: keep-alive\r\n'
 printf '\r\n'
 printf 'retry: 2000\n\n'
 
-while :; do
+sample_count=0
+max_samples=$((600 / sample_interval))
+while [ "$sample_count" -lt "$max_samples" ]; do
 	printf 'event: snapshot\n'
 	printf 'data: '
 	snapshot
 	printf '\n\n' || exit 0
-	sleep 5
+	sample_count=$((sample_count + 1))
+	[ "$sample_count" -lt "$max_samples" ] || exit 0
+	sleep "$sample_interval"
 done

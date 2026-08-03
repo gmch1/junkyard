@@ -2,9 +2,14 @@
 
 TOKEN_FILE="/etc/router-status-api.token"
 WAN_INTERFACE="eth1"
+CLIENT_COUNTERS_FILE="/www-router-status/client-counters.sh"
 
 if [ -r /etc/router-status-api.interface ]; then
 	IFS= read -r WAN_INTERFACE < /etc/router-status-api.interface
+fi
+
+if [ -r "$CLIENT_COUNTERS_FILE" ]; then
+	. "$CLIENT_COUNTERS_FILE"
 fi
 
 respond_json() {
@@ -78,12 +83,20 @@ for thermal_zone in /sys/class/thermal/thermal_zone*; do
 	temperature_c=$(awk -v value="$temperature_millidegrees" 'BEGIN { printf "%.1f", value / 1000 }')
 	break
 done
+clients_json="[]"
+if command -v client_counters_json >/dev/null 2>&1; then
+	clients_json=$(client_counters_json 2>/dev/null)
+	case "$clients_json" in
+		'['*']') ;;
+		*) clients_json='[]' ;;
+	esac
+fi
 
 printf 'Status: 200 OK\r\n'
 printf 'Content-Type: application/json\r\n'
 printf 'Cache-Control: no-store\r\n'
 printf 'X-Content-Type-Options: nosniff\r\n'
 printf '\r\n'
-printf '{"version":1,"cpu_total":%s,"cpu_idle":%s,"mem_total_kb":%s,"mem_available_kb":%s,"rx_bytes":%s,"tx_bytes":%s,"link_mbps":%s,"uptime_seconds":%s,"temperature_c":%s}\n' \
+printf '{"version":1,"cpu_total":%s,"cpu_idle":%s,"mem_total_kb":%s,"mem_available_kb":%s,"rx_bytes":%s,"tx_bytes":%s,"link_mbps":%s,"uptime_seconds":%s,"temperature_c":%s,"clients_sampled_at":%s,"clients":%s}\n' \
 	"$cpu_total" "$cpu_idle" "$mem_total_kb" "$mem_available_kb" \
-	"$rx_bytes" "$tx_bytes" "${link_mbps:--1}" "$uptime_seconds" "$temperature_c"
+	"$rx_bytes" "$tx_bytes" "${link_mbps:--1}" "$uptime_seconds" "$temperature_c" "$uptime_seconds" "$clients_json"

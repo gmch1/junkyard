@@ -21,6 +21,24 @@ private struct APISnapshot: Decodable {
     let linkMbps: Int
     let uptimeSeconds: Double
     let temperatureC: Double?
+    let clientsSampledAt: Double?
+    let clients: [APIClientCounter]?
+}
+
+private struct APIClientCounter: Decodable {
+    let mac: String
+    let name: String
+    let ip: String
+    let rxBytes: UInt64
+    let txBytes: UInt64
+}
+
+private struct ClientRate {
+    let mac: String
+    let name: String
+    let ip: String
+    let downloadRate: Double
+    let uploadRate: Double
 }
 
 private final class LightGlassCardView: NSVisualEffectView {
@@ -61,7 +79,7 @@ private final class LightGlassCardView: NSVisualEffectView {
     }
 }
 
-private final class StatusCardController: NSWindowController {
+private final class StatusCardController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let statusDot = NSView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
     private let statusLabel = NSTextField(labelWithString: "正在连接…")
     private let downloadValue = NSTextField(labelWithString: "--")
@@ -71,11 +89,15 @@ private final class StatusCardController: NSWindowController {
     private let temperatureValue = NSTextField(labelWithString: "--")
     private let wanValue = NSTextField(labelWithString: "--")
     private let rebootButton = NSButton()
+    private let trafficTable = NSTableView()
+    private var latestClientRates: [ClientRate] = []
+    private var clientOrder: [String] = []
+    private var clientRatesByMAC: [String: ClientRate] = [:]
     var onRebootRequested: (() -> Void)?
 
     init() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 192),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 348),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -165,7 +187,9 @@ private final class StatusCardController: NSWindowController {
         metrics.distribution = .fillEqually
         metrics.spacing = 8
 
-        let content = NSStackView(views: [header, rates, metrics])
+        let traffic = makeTrafficTable()
+
+        let content = NSStackView(views: [header, rates, metrics, traffic])
         content.orientation = .vertical
         content.alignment = .width
         content.spacing = 9
@@ -179,6 +203,136 @@ private final class StatusCardController: NSWindowController {
             content.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 14),
             content.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -13)
         ])
+    }
+
+    private func makeTrafficTable() -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
+        container.layer?.borderWidth = 0.5
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        container.layer?.cornerRadius = 16
+
+        let deviceColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("device"))
+        deviceColumn.title = ""
+        deviceColumn.width = 136
+        deviceColumn.minWidth = 110
+        let downloadColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("download"))
+        downloadColumn.title = ""
+        downloadColumn.width = 72
+        downloadColumn.minWidth = 64
+        let uploadColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("upload"))
+        uploadColumn.title = ""
+        uploadColumn.width = 72
+        uploadColumn.minWidth = 64
+
+        trafficTable.addTableColumn(deviceColumn)
+        trafficTable.addTableColumn(downloadColumn)
+        trafficTable.addTableColumn(uploadColumn)
+        trafficTable.dataSource = self
+        trafficTable.delegate = self
+        trafficTable.headerView = nil
+        trafficTable.backgroundColor = .clear
+        trafficTable.selectionHighlightStyle = .none
+        trafficTable.rowHeight = 19
+        trafficTable.intercellSpacing = NSSize(width: 6, height: 1)
+        trafficTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        trafficTable.allowsColumnReordering = false
+        trafficTable.allowsColumnResizing = false
+        trafficTable.usesAlternatingRowBackgroundColors = false
+
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.documentView = trafficTable
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        let deviceHeader = makeTrafficHeaderLabel("设备名称", alignment: .left)
+        let downloadHeader = makeTrafficHeaderLabel("下行速度", alignment: .right)
+        let uploadHeader = makeTrafficHeaderLabel("上行速度", alignment: .right)
+        downloadHeader.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        uploadHeader.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        let header = NSStackView(views: [deviceHeader, downloadHeader, uploadHeader])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        let separator = NSView()
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(scrollView)
+        container.addSubview(header)
+        container.addSubview(separator)
+
+        NSLayoutConstraint.activate([
+            container.heightAnchor.constraint(equalToConstant: 146),
+            header.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            header.heightAnchor.constraint(equalToConstant: 16),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            separator.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 3),
+            separator.heightAnchor.constraint(equalToConstant: 0.5),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            scrollView.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 3),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -7)
+        ])
+        return container
+    }
+
+    private func makeTrafficHeaderLabel(
+        _ title: String,
+        alignment: NSTextAlignment
+    ) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 9.5, weight: .medium)
+        label.textColor = .tertiaryLabelColor
+        label.alignment = alignment
+        return label
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        latestClientRates.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row < latestClientRates.count, let tableColumn else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("traffic-\(tableColumn.identifier.rawValue)")
+        let field: NSTextField
+        if let reusable = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
+            field = reusable
+        } else {
+            field = NSTextField(labelWithString: "")
+            field.identifier = identifier
+            field.font = tableColumn.identifier.rawValue == "device"
+                ? .systemFont(ofSize: 10.5, weight: .medium)
+                : .monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
+            field.textColor = .labelColor
+            field.lineBreakMode = .byTruncatingTail
+            field.alignment = tableColumn.identifier.rawValue == "device" ? .left : .right
+        }
+
+        let client = latestClientRates[row]
+        switch tableColumn.identifier.rawValue {
+        case "device":
+            field.stringValue = client.name
+            field.toolTip = [client.ip, client.mac].filter { !$0.isEmpty }.joined(separator: " · ")
+        case "download":
+            field.stringValue = Self.compactRate(client.downloadRate)
+        case "upload":
+            field.stringValue = Self.compactRate(client.uploadRate)
+        default:
+            return nil
+        }
+        return field
     }
 
     private func makeRateTile(title: String, arrow: String, value: NSTextField) -> NSView {
@@ -292,12 +446,59 @@ private final class StatusCardController: NSWindowController {
         statusLabel.stringValue = "在线 · 运行 \(Self.uptime(uptimeSeconds))"
     }
 
+    func updateClientRates(_ rates: [ClientRate]) {
+        let previousCount = latestClientRates.count
+        let visibleRates = rates.filter { !Self.isHiddenIoTDevice($0) }
+        let currentByMAC = Dictionary(uniqueKeysWithValues: visibleRates.map { ($0.mac, $0) })
+
+        for client in visibleRates where !clientOrder.contains(client.mac) {
+            clientOrder.append(client.mac)
+        }
+        for mac in clientOrder {
+            if let current = currentByMAC[mac] {
+                clientRatesByMAC[mac] = current
+            } else if let previous = clientRatesByMAC[mac] {
+                clientRatesByMAC[mac] = ClientRate(
+                    mac: previous.mac,
+                    name: previous.name,
+                    ip: previous.ip,
+                    downloadRate: 0,
+                    uploadRate: 0
+                )
+            }
+        }
+        latestClientRates = clientOrder.compactMap { clientRatesByMAC[$0] }
+        if latestClientRates.count != previousCount {
+            trafficTable.reloadData()
+        } else if !latestClientRates.isEmpty {
+            trafficTable.reloadData(
+                forRowIndexes: IndexSet(integersIn: 0..<latestClientRates.count),
+                columnIndexes: IndexSet(integersIn: 0..<trafficTable.numberOfColumns)
+            )
+        }
+    }
+
+    private static func isHiddenIoTDevice(_ client: ClientRate) -> Bool {
+        let name = client.name.lowercased()
+        return ["yeelink", "yeelight", "chuangmi-", "lumi-"].contains { name.contains($0) }
+    }
+
     private static func rate(_ bytesPerSecond: Double) -> String {
         if bytesPerSecond >= 1_000_000 {
             return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
         }
         if bytesPerSecond >= 1_000 {
             return String(format: "%.1f KB/s", bytesPerSecond / 1_000)
+        }
+        return String(format: "%.0f B/s", bytesPerSecond)
+    }
+
+    private static func compactRate(_ bytesPerSecond: Double) -> String {
+        if bytesPerSecond >= 1_000_000 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        }
+        if bytesPerSecond >= 1_000 {
+            return String(format: "%.0f KB/s", bytesPerSecond / 1_000)
         }
         return String(format: "%.0f B/s", bytesPerSecond)
     }
@@ -331,17 +532,23 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
     private lazy var streamSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForRequest = 90
         configuration.timeoutIntervalForResource = 3_700
         configuration.httpMaximumConnectionsPerHost = 1
         return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
     }()
     private var streamTask: URLSessionDataTask?
     private var streamBuffer = Data()
-    private var shouldReceiveEvents = false
+    private var desiredStreamInterval: Int?
+    private var activeStreamInterval: Int?
+    private var fullyOccludedSince: Date?
     private var reconnectWorkItem: DispatchWorkItem?
+    private var visibilityWorkItems: [DispatchWorkItem] = []
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var windowObservers: [NSObjectProtocol] = []
     private var previous: Counters?
+    private var previousClientCounters: [String: APIClientCounter] = [:]
+    private var previousClientSampledAt: Double?
     private var rebooting = false
     var onRateUpdate: ((Double, Double) -> Void)?
 
@@ -381,67 +588,156 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
 
     deinit {
         reconnectWorkItem?.cancel()
+        visibilityWorkItems.forEach { $0.cancel() }
         workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
         streamSession.invalidateAndCancel()
         controlSession.invalidateAndCancel()
     }
 
     func start() {
-        let center = NSWorkspace.shared.notificationCenter
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
         let names: [Notification.Name] = [
             NSWorkspace.didActivateApplicationNotification,
             NSWorkspace.activeSpaceDidChangeNotification,
             NSWorkspace.didWakeNotification
         ]
         workspaceObservers = names.map { name in
-            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.reevaluateWorkspaceSoon()
+            workspaceCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.reevaluateVisibilitySoon()
             }
         }
         workspaceObservers.append(
-            center.addObserver(
+            workspaceCenter.addObserver(
                 forName: NSWorkspace.willSleepNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.suspendEventStream()
+                self?.pauseForSleep()
             }
         )
-        updateStreamingState()
+
+        let notificationCenter = NotificationCenter.default
+        if let window = card.window {
+            let windowNotifications: [Notification.Name] = [
+                NSWindow.didChangeOcclusionStateNotification,
+                NSWindow.didMoveNotification,
+                NSWindow.didMiniaturizeNotification,
+                NSWindow.didDeminiaturizeNotification
+            ]
+            windowObservers = windowNotifications.map { name in
+                notificationCenter.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.reevaluateVisibilitySoon()
+                }
+            }
+        }
+        windowObservers.append(
+            notificationCenter.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reevaluateVisibilitySoon()
+            }
+        )
+        reevaluateVisibilitySoon()
     }
 
     func refresh() {
-        if isDesktopActive {
+        if desiredStreamInterval != nil {
             restartEventStream()
         } else {
             fetchOneSnapshot()
         }
     }
 
-    private var isDesktopActive: Bool {
-        guard let identifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
-            return false
-        }
-        return identifier == "com.apple.finder" || identifier == Bundle.main.bundleIdentifier
+    func windowVisibilityChanged() {
+        reevaluateVisibilitySoon()
     }
 
-    private func reevaluateWorkspaceSoon() {
+    private var isVisibleOnAnyDisplay: Bool {
+        guard let window = card.window,
+              window.isVisible,
+              !window.isMiniaturized else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    private func reevaluateVisibilitySoon() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.updateStreamingState()
+            self?.updateVisibilityPolicy()
         }
     }
 
-    private func updateStreamingState() {
-        if isDesktopActive {
-            shouldReceiveEvents = true
-            startEventStream()
-        } else {
-            suspendEventStream()
+    private func updateVisibilityPolicy() {
+        if isVisibleOnAnyDisplay {
+            fullyOccludedSince = nil
+            cancelVisibilityTransitions()
+            applyStreamInterval(1)
+            return
         }
+
+        if fullyOccludedSince == nil {
+            fullyOccludedSince = Date()
+            scheduleVisibilityTransitions()
+        }
+
+        let elapsed = Date().timeIntervalSince(fullyOccludedSince ?? Date())
+        if elapsed >= 15 * 60 {
+            applyStreamInterval(nil)
+        } else if elapsed >= 5 * 60 {
+            applyStreamInterval(60)
+        } else if elapsed >= 60 {
+            applyStreamInterval(30)
+        } else {
+            applyStreamInterval(15)
+        }
+    }
+
+    private func scheduleVisibilityTransitions() {
+        cancelVisibilityTransitions()
+        for delay in [60.0, 5 * 60.0, 15 * 60.0] {
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.updateVisibilityPolicy()
+            }
+            visibilityWorkItems.append(workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
+    }
+
+    private func cancelVisibilityTransitions() {
+        visibilityWorkItems.forEach { $0.cancel() }
+        visibilityWorkItems.removeAll(keepingCapacity: true)
+    }
+
+    private func applyStreamInterval(_ interval: Int?) {
+        if desiredStreamInterval == interval {
+            if interval == nil || (streamTask != nil && activeStreamInterval == interval) {
+                return
+            }
+        }
+
+        desiredStreamInterval = interval
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+
+        let task = streamTask
+        streamTask = nil
+        activeStreamInterval = nil
+        task?.cancel()
+        streamBuffer.removeAll(keepingCapacity: interval != nil)
+
+        guard interval != nil else {
+            previous = nil
+            previousClientCounters.removeAll(keepingCapacity: true)
+            previousClientSampledAt = nil
+            card.setPaused()
+            return
+        }
+        startEventStream()
     }
 
     private func startEventStream() {
-        guard shouldReceiveEvents, streamTask == nil else { return }
+        guard let interval = desiredStreamInterval, streamTask == nil else { return }
         guard let token else {
             card.setConnected(false, message: "缺少API Token")
             return
@@ -450,48 +746,51 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         streamBuffer.removeAll(keepingCapacity: true)
-        previous = nil
 
-        let eventsEndpoint = endpoint
+        let baseEventsEndpoint = endpoint
             .deletingLastPathComponent()
             .appendingPathComponent("events", isDirectory: false)
+        var components = URLComponents(url: baseEventsEndpoint, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "interval", value: String(interval))]
+        guard let eventsEndpoint = components?.url else {
+            card.setConnected(false, message: "SSE地址无效")
+            return
+        }
         var request = URLRequest(url: eventsEndpoint)
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 20
+        request.timeoutInterval = 90
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
         card.setConnecting()
         let task = streamSession.dataTask(with: request)
         streamTask = task
+        activeStreamInterval = interval
         task.resume()
     }
 
-    private func suspendEventStream() {
-        shouldReceiveEvents = false
-        reconnectWorkItem?.cancel()
-        reconnectWorkItem = nil
-        let task = streamTask
-        streamTask = nil
-        task?.cancel()
-        streamBuffer.removeAll(keepingCapacity: false)
-        previous = nil
-        card.setPaused()
+    private func pauseForSleep() {
+        fullyOccludedSince = Date()
+        cancelVisibilityTransitions()
+        applyStreamInterval(nil)
     }
 
     private func restartEventStream() {
-        shouldReceiveEvents = true
+        guard desiredStreamInterval != nil else {
+            fetchOneSnapshot()
+            return
+        }
         let task = streamTask
         streamTask = nil
+        activeStreamInterval = nil
         task?.cancel()
         streamBuffer.removeAll(keepingCapacity: true)
-        previous = nil
         startEventStream()
     }
 
     private func scheduleReconnect() {
-        guard shouldReceiveEvents else { return }
+        guard desiredStreamInterval != nil else { return }
         reconnectWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in self?.startEventStream() }
         reconnectWorkItem = workItem
@@ -510,6 +809,7 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
         }
         guard let http = response as? HTTPURLResponse else {
             streamTask = nil
+            activeStreamInterval = nil
             card.setConnected(false, message: "SSE响应异常")
             completionHandler(.cancel)
             scheduleReconnect()
@@ -517,6 +817,7 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
         }
         guard http.statusCode == 200 else {
             streamTask = nil
+            activeStreamInterval = nil
             card.setConnected(false, message: http.statusCode == 401 ? "Token无效" : "SSE错误 \(http.statusCode)")
             completionHandler(.cancel)
             scheduleReconnect()
@@ -543,9 +844,9 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
     ) {
         guard task === streamTask else { return }
         streamTask = nil
+        activeStreamInterval = nil
         streamBuffer.removeAll(keepingCapacity: true)
-        previous = nil
-        if shouldReceiveEvents {
+        if desiredStreamInterval != nil {
             card.setConnecting()
             scheduleReconnect()
         }
@@ -636,6 +937,8 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
                     return
                 }
                 self.previous = nil
+                self.previousClientCounters.removeAll(keepingCapacity: true)
+                self.previousClientSampledAt = nil
                 self.card.setRebooting()
             }
         }.resume()
@@ -669,6 +972,38 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
                 uploadRate = Double(current.txBytes - previous.txBytes) / elapsed
             }
         }
+
+        let clientSampledAt = snapshot.clientsSampledAt ?? snapshot.uptimeSeconds
+        var newClientRates: [ClientRate]?
+        if previousClientSampledAt != clientSampledAt {
+            let clientElapsed = previousClientSampledAt.flatMap { previousSample in
+                let delta = clientSampledAt - previousSample
+                return delta > 0 ? delta : nil
+            }
+            var rates: [ClientRate] = []
+            for client in snapshot.clients ?? [] {
+                var clientDownloadRate = 0.0
+                var clientUploadRate = 0.0
+                if let elapsed = clientElapsed, let old = previousClientCounters[client.mac] {
+                    let rxDelta = client.rxBytes >= old.rxBytes ? client.rxBytes - old.rxBytes : 0
+                    let txDelta = client.txBytes >= old.txBytes ? client.txBytes - old.txBytes : 0
+                    clientDownloadRate = Double(rxDelta) / elapsed
+                    clientUploadRate = Double(txDelta) / elapsed
+                }
+                rates.append(ClientRate(
+                    mac: client.mac,
+                    name: client.name,
+                    ip: client.ip,
+                    downloadRate: clientDownloadRate,
+                    uploadRate: clientUploadRate
+                ))
+            }
+            previousClientCounters = Dictionary(
+                uniqueKeysWithValues: (snapshot.clients ?? []).map { ($0.mac, $0) }
+            )
+            previousClientSampledAt = clientSampledAt
+            newClientRates = rates
+        }
         self.previous = current
 
         let usedKB = snapshot.memTotalKb - snapshot.memAvailableKb
@@ -685,6 +1020,9 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
             uptimeSeconds: snapshot.uptimeSeconds,
             temperatureC: snapshot.temperatureC
         )
+        if let newClientRates {
+            card.updateClientRates(newClientRates)
+        }
         onRateUpdate?(downloadRate, uploadRate)
     }
 }
@@ -731,6 +1069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = card.window else { return }
         if window.isVisible { window.orderOut(nil) }
         else { window.orderFrontRegardless() }
+        monitor.windowVisibilityChanged()
     }
 
     @objc private func refresh() { monitor.refresh() }
