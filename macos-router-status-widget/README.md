@@ -2,7 +2,7 @@
 
 一个轻量的 macOS 桌面路由器状态小组件。它通过局域网 Token API 建立 SSE 连接，由 OpenWrt 按需推送状态。只要组件在任意显示器上仍然可见，就保持 1 秒更新；所有显示器上都被遮挡后，采样频率会逐级降低，持续遮挡 15 分钟后才完全停止。组件以浅色毛玻璃卡片展示 WAN 实时速率、物理协商速率、CPU、内存、温度、运行时间，以及局域网设备的双向实时流量，并提供受限的路由器重启按钮。
 
-小组件位于桌面层，普通应用窗口会自然盖住它，不会一直悬浮在最前面。点击桌面或使用“显示桌面”即可查看；菜单栏网络图标可以隐藏、显示、立即刷新或退出。
+小组件位于桌面层，普通应用窗口会自然盖住它，不会一直悬浮在最前面。点击桌面或使用“显示桌面”即可查看；应用不占用菜单栏或 Dock，右键点击卡片可以立即刷新或退出。
 
 ![Router Status Widget](assets/router-status-widget.png)
 
@@ -111,7 +111,7 @@ zsh build.sh
 open build/RouterStatusWidget.app
 ```
 
-生成的应用位于 `build/RouterStatusWidget.app`，构建脚本会执行本地 ad-hoc 签名。首次打开下载的CI构建产物时，macOS可能要求在“隐私与安全性”中确认。
+生成的应用位于 `build/RouterStatusWidget.app`，构建脚本会执行本地 ad-hoc 签名。需要长期使用时，可将它复制到 `/Applications` 后再打开；首次打开下载的CI构建产物时，macOS可能要求在“隐私与安全性”中确认。
 
 ## 验证API
 
@@ -255,7 +255,7 @@ URLSession + Authorization: Bearer（单一长连接）
 计算相邻快照差值
         │
         ▼
-AppKit浅色毛玻璃桌面卡片与菜单栏
+AppKit浅色毛玻璃桌面卡片与右键菜单
 ```
 
 核心实现分为七部分：

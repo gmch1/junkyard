@@ -94,6 +94,7 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
     private var clientOrder: [String] = []
     private var clientRatesByMAC: [String: ClientRate] = [:]
     var onRebootRequested: (() -> Void)?
+    var onRefreshRequested: (() -> Void)?
 
     init() {
         let panel = NSPanel(
@@ -196,6 +197,7 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
         content.translatesAutoresizingMaskIntoConstraints = false
 
         cardView.addSubview(content)
+        cardView.menu = makeCardMenu()
         panel.contentView = cardView
         NSLayoutConstraint.activate([
             traffic.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -206,6 +208,18 @@ private final class StatusCardController: NSWindowController, NSTableViewDataSou
             content.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -13)
         ])
     }
+
+    private func makeCardMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "立即刷新", action: #selector(requestRefresh), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "退出", action: #selector(quit), keyEquivalent: "")
+        menu.items.forEach { $0.target = self }
+        return menu
+    }
+
+    @objc private func requestRefresh() { onRefreshRequested?() }
+    @objc private func quit() { NSApp.terminate(nil) }
 
     private func makeTrafficTable() -> NSView {
         let container = NSView()
@@ -562,8 +576,6 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
     private var previousClientCounters: [String: APIClientCounter] = [:]
     private var previousClientSampledAt: Double?
     private var rebooting = false
-    var onRateUpdate: ((Double, Double) -> Void)?
-
     init(card: StatusCardController) {
         self.card = card
         let defaults = UserDefaults.standard
@@ -661,10 +673,6 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
         } else {
             fetchOneSnapshot()
         }
-    }
-
-    func windowVisibilityChanged() {
-        reevaluateVisibilitySoon()
     }
 
     private var isVisibleOnAnyDisplay: Bool {
@@ -1035,14 +1043,12 @@ private final class RouterMonitor: NSObject, URLSessionDataDelegate, @unchecked 
         if let newClientRates {
             card.updateClientRates(newClientRates)
         }
-        onRateUpdate?(downloadRate, uploadRate)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var card: StatusCardController!
     private var monitor: RouterMonitor!
-    private var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1051,41 +1057,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         card.showWindow(nil)
         card.window?.orderFrontRegardless()
 
-        buildStatusMenu()
         monitor = RouterMonitor(card: card)
         card.onRebootRequested = { [weak self] in self?.monitor.reboot() }
-        monitor.onRateUpdate = { [weak self] down, up in
-            self?.statusItem.button?.title = String(format: " ↓%.1f ↑%.1f", down / 1_000_000, up / 1_000_000)
-        }
+        card.onRefreshRequested = { [weak self] in self?.monitor.refresh() }
         monitor.start()
     }
-
-    private func buildStatusMenu() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "network", accessibilityDescription: "路由器状态")
-            button.imagePosition = .imageLeading
-            button.title = " 连接中"
-        }
-
-        let menu = NSMenu()
-        menu.addItem(withTitle: "显示/隐藏状态卡", action: #selector(toggleCard), keyEquivalent: "")
-        menu.addItem(withTitle: "立即刷新", action: #selector(refresh), keyEquivalent: "r")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "退出", action: #selector(quit), keyEquivalent: "q")
-        menu.items.forEach { $0.target = self }
-        statusItem.menu = menu
-    }
-
-    @objc private func toggleCard() {
-        guard let window = card.window else { return }
-        if window.isVisible { window.orderOut(nil) }
-        else { window.orderFrontRegardless() }
-        monitor.windowVisibilityChanged()
-    }
-
-    @objc private func refresh() { monitor.refresh() }
-    @objc private func quit() { NSApp.terminate(nil) }
 }
 
 @main
