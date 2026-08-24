@@ -164,3 +164,94 @@ func TestInvalidKeyIsRejected(t *testing.T) {
 		t.Fatal("short API key was accepted")
 	}
 }
+
+func TestManagementPageConfiguresAnUninitializedServiceFromLoopback(t *testing.T) {
+	t.Setenv("ALIYUN_PROXY_STATE_DIR", t.TempDir())
+	svc := newService(testConfig("https://example.invalid", "model-one"), "")
+	handler := svc.handler("ap-client")
+
+	home := httptest.NewRequest(http.MethodGet, "/", nil)
+	home.RemoteAddr = "127.0.0.1:49321"
+	homeResult := httptest.NewRecorder()
+	handler.ServeHTTP(homeResult, home)
+	if homeResult.Code != http.StatusOK || !strings.Contains(homeResult.Body.String(), "阿里云模型代理") {
+		t.Fatalf("management page status = %d, body = %q", homeResult.Code, homeResult.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	statusRequest.RemoteAddr = "[::1]:49322"
+	statusResult := httptest.NewRecorder()
+	handler.ServeHTTP(statusResult, statusRequest)
+	if statusResult.Code != http.StatusOK {
+		t.Fatalf("management status = %d, body = %s", statusResult.Code, statusResult.Body.String())
+	}
+	var initial map[string]any
+	if err := json.NewDecoder(statusResult.Body).Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if configured, _ := initial["configured"].(bool); configured {
+		t.Fatal("uninitialized service unexpectedly reported a configured key")
+	}
+	if initial["client_key"] != "ap-client" || initial["model_alias"] != modelAlias {
+		t.Fatalf("unexpected management connection info: %#v", initial)
+	}
+
+	remoteRequest := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+	remoteRequest.RemoteAddr = "192.168.1.50:49323"
+	remoteResult := httptest.NewRecorder()
+	handler.ServeHTTP(remoteResult, remoteRequest)
+	if remoteResult.Code != http.StatusForbidden {
+		t.Fatalf("remote management status = %d, want 403", remoteResult.Code)
+	}
+
+	missingHeader := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/upstream-key",
+		strings.NewReader(`{"api_key":"sk-test-upstream-key"}`),
+	)
+	missingHeader.RemoteAddr = "127.0.0.1:49324"
+	missingHeaderResult := httptest.NewRecorder()
+	handler.ServeHTTP(missingHeaderResult, missingHeader)
+	if missingHeaderResult.Code != http.StatusForbidden {
+		t.Fatalf("missing admin header status = %d, want 403", missingHeaderResult.Code)
+	}
+
+	saveRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/admin/upstream-key",
+		strings.NewReader(`{"api_key":"sk-test-upstream-key"}`),
+	)
+	saveRequest.RemoteAddr = "127.0.0.1:49324"
+	saveRequest.Header.Set("Content-Type", "application/json")
+	saveRequest.Header.Set("X-Aliyun-Proxy-Admin", "1")
+	saveResult := httptest.NewRecorder()
+	handler.ServeHTTP(saveResult, saveRequest)
+	if saveResult.Code != http.StatusOK {
+		t.Fatalf("save key status = %d, body = %s", saveResult.Code, saveResult.Body.String())
+	}
+	if readSecret("dashscope.key") != "sk-test-upstream-key" {
+		t.Fatal("management page did not persist the upstream key")
+	}
+	var saved map[string]any
+	if err := json.NewDecoder(saveResult.Body).Decode(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if configured, _ := saved["configured"].(bool); !configured {
+		t.Fatal("configured service was not reported as configured")
+	}
+}
+
+func TestChatExplainsMissingUpstreamConfiguration(t *testing.T) {
+	svc := newService(testConfig("https://example.invalid", "model-one"), "")
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`),
+	)
+	request.Header.Set("Authorization", "Bearer ap-client")
+	result := httptest.NewRecorder()
+	svc.handler("ap-client").ServeHTTP(result, request)
+	if result.Code != http.StatusServiceUnavailable || !strings.Contains(result.Body.String(), "upstream_not_configured") {
+		t.Fatalf("missing configuration status = %d, body = %s", result.Code, result.Body.String())
+	}
+}

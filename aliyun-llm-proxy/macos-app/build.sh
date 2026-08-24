@@ -7,6 +7,9 @@ build_dir="$project_dir/build"
 app_dir="$build_dir/AliyunLLMProxy.app"
 module_cache="$build_dir/module-cache"
 backend_dir="$project_dir/Backend"
+signing_certificate="$project_dir/signing/AliyunLLMProxy-Release.pem"
+signing_identity="${MACOS_SIGNING_IDENTITY:--}"
+signing_keychain="${MACOS_KEYCHAIN_PATH:-}"
 
 command -v go >/dev/null || { echo "Go 1.22+ is required." >&2; exit 1; }
 command -v xcrun >/dev/null || { echo "Xcode Command Line Tools are required." >&2; exit 1; }
@@ -61,8 +64,30 @@ if [[ -f "$project_dir/Resources/AppIcon.png" ]]; then
 fi
 
 plutil -lint "$app_dir/Contents/Info.plist"
-codesign --force --sign - "$app_dir/Contents/MacOS/AliyunLLMProxyBackend"
-codesign --force --deep --sign - "$app_dir"
+signing_args=(--force --sign "$signing_identity")
+if [[ "$signing_identity" != "-" ]]; then
+  [[ -f "$signing_certificate" ]] || { echo "Pinned signing certificate is missing." >&2; exit 1; }
+  [[ -n "$signing_keychain" ]] || { echo "MACOS_KEYCHAIN_PATH is required for release signing." >&2; exit 1; }
+  signing_args+=(--keychain "$signing_keychain" --options runtime --timestamp=none)
+fi
+
+if [[ "$signing_identity" == "-" ]]; then
+  codesign "${signing_args[@]}" "$app_dir/Contents/MacOS/AliyunLLMProxyBackend"
+  codesign "${signing_args[@]}" "$app_dir"
+else
+  signing_certificate_sha1="$(openssl x509 -in "$signing_certificate" -outform DER | shasum | awk '{ print $1 }')"
+  backend_requirement="designated => identifier \"io.github.gmch1.AliyunLLMProxy.backend\" and certificate leaf = H\"${signing_certificate_sha1}\""
+  stable_requirement="designated => identifier \"io.github.gmch1.AliyunLLMProxy\" and certificate leaf = H\"${signing_certificate_sha1}\""
+  codesign \
+    "${signing_args[@]}" \
+    --identifier "io.github.gmch1.AliyunLLMProxy.backend" \
+    --requirements "=${backend_requirement}" \
+    "$app_dir/Contents/MacOS/AliyunLLMProxyBackend"
+  codesign \
+    "${signing_args[@]}" \
+    --requirements "=${stable_requirement}" \
+    "$app_dir"
+fi
 codesign --verify --deep --strict "$app_dir"
 
 archive="$build_dir/AliyunLLMProxy-macOS-universal.zip"

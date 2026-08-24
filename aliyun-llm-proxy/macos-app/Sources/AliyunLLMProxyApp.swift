@@ -3,19 +3,8 @@ import Darwin
 import Foundation
 
 private let servicePort = 39281
-private let proxyModel = "aliyun-translate-auto"
-
-private struct ProxyStatus: Decodable {
-    struct Client: Decodable {
-        let requests: UInt64
-        let successes: UInt64
-        let failures: UInt64
-    }
-
-    let uptime_seconds: Int
-    let available_models: Int
-    let client: Client
-}
+private let modelAlias = "aliyun-translate-auto"
+private let managementURL = URL(string: "http://127.0.0.1:\(servicePort)/")!
 
 private struct BackendError: LocalizedError {
     let message: String
@@ -48,7 +37,7 @@ private final class BackendController {
     }
 
     @discardableResult
-    func run(_ arguments: [String], input: String? = nil) throws -> String {
+    func run(_ arguments: [String]) throws -> String {
         guard let executableURL else {
             throw BackendError(message: "应用包内缺少代理程序，请重新安装应用。")
         }
@@ -67,18 +56,7 @@ private final class BackendController {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
-        var inputPipe: Pipe?
-        if input != nil {
-            let pipe = Pipe()
-            process.standardInput = pipe
-            inputPipe = pipe
-        }
-
         try process.run()
-        if let input, let inputPipe {
-            inputPipe.fileHandleForWriting.write(Data(input.utf8))
-            try? inputPipe.fileHandleForWriting.close()
-        }
         process.waitUntilExit()
 
         let output = String(
@@ -96,335 +74,209 @@ private final class BackendController {
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func clientKey() throws -> String {
-        try run(["key"])
-    }
-
-    func saveUpstreamKey(_ value: String) throws {
-        _ = try run(["set-upstream-key"], input: value)
-    }
-
-    func start() throws {
-        _ = try run(["start"])
-    }
-
-    func stop() throws {
-        _ = try run(["stop"])
-    }
+    func start() throws { _ = try run(["start"]) }
+    func stop() throws { _ = try run(["stop"]) }
+    func status() throws { _ = try run(["status"]) }
+    func clientKey() throws -> String { try run(["key"]) }
 }
 
-private final class MainWindowController: NSWindowController {
+private final class MenuBarController: NSObject, NSMenuDelegate {
     private let backend = BackendController()
-    private let statusLabel = NSTextField(labelWithString: "正在检查服务…")
-    private let statusDot = NSView()
-    private let apiKeyField = NSSecureTextField(frame: .zero)
-    private let saveButton = NSButton(title: "保存并启动", target: nil, action: nil)
-    private let toggleButton = NSButton(title: "启动服务", target: nil, action: nil)
-    private let baseURLValue = NSTextField(labelWithString: "—")
-    private let clientKeyValue = NSTextField(labelWithString: "—")
-    private let modelValue = NSTextField(labelWithString: proxyModel)
-    private let modelsValue = NSTextField(labelWithString: "—")
-    private let requestsValue = NSTextField(labelWithString: "—")
-    private let uptimeValue = NSTextField(labelWithString: "—")
-    private let messageLabel = NSTextField(wrappingLabelWithString: "输入阿里云百炼 DashScope API Key 后即可启动。")
-    private var clientKey = ""
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let menu = NSMenu()
+    private let statusMenuItem = NSMenuItem(title: "正在启动服务…", action: nil, keyEquivalent: "")
+    private let toggleMenuItem = NSMenuItem(title: "停止服务", action: nil, keyEquivalent: "")
     private var serviceRunning = false
-    private var timer: Timer?
+    private var refreshTimer: Timer?
+    private var operationInProgress = false
 
-    init() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
+    override init() {
+        super.init()
+        configureStatusItem()
+        configureMenu()
+    }
+
+    deinit { refreshTimer?.invalidate() }
+
+    private func configureStatusItem() {
+        guard let button = statusItem.button else { return }
+        let image = NSImage(
+            systemSymbolName: "network",
+            accessibilityDescription: "阿里云模型代理"
         )
-        window.title = "阿里云模型代理"
-        window.minSize = NSSize(width: 660, height: 520)
-        window.isReleasedWhenClosed = false
-        window.center()
-        super.init(window: window)
-        buildInterface(in: window)
+        image?.isTemplate = true
+        button.image = image
+        if image == nil { button.title = "A" }
+        button.toolTip = "阿里云模型代理"
     }
 
-    required init?(coder: NSCoder) { nil }
+    private func configureMenu() {
+        menu.delegate = self
+        statusMenuItem.isEnabled = false
+        menu.addItem(statusMenuItem)
+        menu.addItem(.separator())
 
-    deinit { timer?.invalidate() }
+        let openItem = NSMenuItem(title: "打开管理页面", action: #selector(openManagementPage), keyEquivalent: "o")
+        openItem.target = self
+        menu.addItem(openItem)
 
-    private func buildInterface(in window: NSWindow) {
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.alignment = .width
-        root.spacing = 18
-        root.translatesAutoresizingMaskIntoConstraints = false
+        let copyBaseURL = NSMenuItem(title: "复制 Base URL", action: #selector(copyBaseURL), keyEquivalent: "")
+        copyBaseURL.target = self
+        menu.addItem(copyBaseURL)
 
-        let title = NSTextField(labelWithString: "阿里云模型代理")
-        title.font = .systemFont(ofSize: 26, weight: .bold)
-        let subtitle = NSTextField(wrappingLabelWithString: "在这台 Mac 上提供局域网可用、OpenAI Chat Completions 兼容的阿里云百炼代理。")
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.font = .systemFont(ofSize: 13)
-        let titleStack = NSStackView(views: [title, subtitle])
-        titleStack.orientation = .vertical
-        titleStack.alignment = .leading
-        titleStack.spacing = 5
+        let copyAPIKey = NSMenuItem(title: "复制客户端 API Key", action: #selector(copyClientKey), keyEquivalent: "")
+        copyAPIKey.target = self
+        menu.addItem(copyAPIKey)
 
-        statusDot.wantsLayer = true
-        statusDot.layer?.cornerRadius = 5
-        statusDot.layer?.backgroundColor = NSColor.systemOrange.cgColor
-        statusDot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            statusDot.widthAnchor.constraint(equalToConstant: 10),
-            statusDot.heightAnchor.constraint(equalToConstant: 10)
-        ])
-        statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        let statusStack = NSStackView(views: [statusDot, statusLabel])
-        statusStack.orientation = .horizontal
-        statusStack.alignment = .centerY
-        statusStack.spacing = 8
+        let copyModel = NSMenuItem(title: "复制模型名称", action: #selector(copyModelAlias), keyEquivalent: "")
+        copyModel.target = self
+        menu.addItem(copyModel)
 
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let header = NSStackView(views: [titleStack, spacer, statusStack])
-        header.orientation = .horizontal
-        header.alignment = .centerY
+        menu.addItem(.separator())
+        toggleMenuItem.target = self
+        toggleMenuItem.action = #selector(toggleService)
+        menu.addItem(toggleMenuItem)
 
-        let connectionGrid = NSGridView(views: [
-            connectionRow(title: "Base URL", value: baseURLValue, action: #selector(copyBaseURL)),
-            connectionRow(title: "API Key", value: clientKeyValue, action: #selector(copyClientKey)),
-            connectionRow(title: "Model", value: modelValue, action: #selector(copyModel))
-        ])
-        connectionGrid.rowSpacing = 10
-        connectionGrid.columnSpacing = 12
-        connectionGrid.column(at: 0).xPlacement = .trailing
-        connectionGrid.column(at: 1).xPlacement = .fill
-
-        let connectionCard = makeCard(title: "客户端连接信息", content: connectionGrid)
-
-        apiKeyField.placeholderString = "输入 DashScope API Key（保存后不会再次显示）"
-        apiKeyField.font = .systemFont(ofSize: 13)
-        apiKeyField.translatesAutoresizingMaskIntoConstraints = false
-        apiKeyField.heightAnchor.constraint(equalToConstant: 32).isActive = true
-
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
-        saveButton.target = self
-        saveButton.action = #selector(saveAndStart)
-        toggleButton.bezelStyle = .rounded
-        toggleButton.target = self
-        toggleButton.action = #selector(toggleService)
-        let buttonRow = NSStackView(views: [saveButton, toggleButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 10
-
-        messageLabel.textColor = .secondaryLabelColor
-        messageLabel.font = .systemFont(ofSize: 12)
-        let form = NSStackView(views: [apiKeyField, buttonRow, messageLabel])
-        form.orientation = .vertical
-        form.alignment = .width
-        form.spacing = 10
-        let configurationCard = makeCard(title: "阿里云配置", content: form)
-
-        let metrics = NSStackView(views: [
-            metricTile(title: "可用模型", value: modelsValue),
-            metricTile(title: "累计请求", value: requestsValue),
-            metricTile(title: "运行时长", value: uptimeValue)
-        ])
-        metrics.orientation = .horizontal
-        metrics.alignment = .height
-        metrics.distribution = .fillEqually
-        metrics.spacing = 12
-
-        root.addArrangedSubview(header)
-        root.addArrangedSubview(connectionCard)
-        root.addArrangedSubview(configurationCard)
-        root.addArrangedSubview(metrics)
-        window.contentView = NSView()
-        window.contentView?.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
-            root.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -28),
-            root.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 26),
-            root.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -26)
-        ])
+        menu.addItem(.separator())
+        let quitItem = NSMenuItem(title: "停止服务并退出", action: #selector(stopAndQuit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+        statusItem.menu = menu
     }
 
-    private func makeCard(title: String, content: NSView) -> NSView {
-        let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: 16, weight: .semibold)
-        let stack = NSStackView(views: [heading, content])
-        stack.orientation = .vertical
-        stack.alignment = .width
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let box = NSBox()
-        box.boxType = .custom
-        box.borderType = .lineBorder
-        box.borderColor = .separatorColor
-        box.borderWidth = 1
-        box.cornerRadius = 12
-        box.fillColor = .controlBackgroundColor
-        box.contentViewMargins = NSSize(width: 18, height: 16)
-        box.contentView = stack
-        return box
-    }
-
-    private func connectionRow(title: String, value: NSTextField, action: Selector) -> [NSView] {
-        let label = NSTextField(labelWithString: title)
-        label.textColor = .secondaryLabelColor
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        value.isSelectable = true
-        value.lineBreakMode = .byTruncatingMiddle
-        value.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        let button = NSButton(title: "复制", target: self, action: action)
-        button.bezelStyle = .rounded
-        return [label, value, button]
-    }
-
-    private func metricTile(title: String, value: NSTextField) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.textColor = .secondaryLabelColor
-        label.font = .systemFont(ofSize: 12)
-        value.font = .systemFont(ofSize: 20, weight: .semibold)
-        let stack = NSStackView(views: [label, value])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 5
-        let box = NSBox()
-        box.boxType = .custom
-        box.borderType = .lineBorder
-        box.borderColor = .separatorColor
-        box.cornerRadius = 10
-        box.contentViewMargins = NSSize(width: 14, height: 12)
-        box.contentView = stack
-        return box
-    }
-
-    func startMonitoring() {
-        baseURLValue.stringValue = "http://\(localIPv4Address()):\(servicePort)/v1"
-        modelValue.stringValue = proxyModel
-        loadClientKeyAndRefresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+    func launch() {
+        setStatus(title: "正在启动服务…", running: false)
+        performBackendOperation(resultRunning: true, openPageOnSuccess: true) { backend in
+            try backend.start()
+        }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
             self?.refreshStatus()
         }
     }
 
-    private func loadClientKeyAndRefresh() {
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshStatus()
+    }
+
+    private func refreshStatus() {
+        guard !operationInProgress else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let running = (try? self.backend.status()) != nil
+            DispatchQueue.main.async {
+                self.setStatus(title: running ? "代理服务运行中" : "代理服务已停止", running: running)
+            }
+        }
+    }
+
+    private func setStatus(title: String, running: Bool) {
+        serviceRunning = running
+        statusMenuItem.title = title
+        toggleMenuItem.title = running ? "停止服务" : "启动服务"
+        toggleMenuItem.isEnabled = !operationInProgress
+        statusItem.button?.toolTip = "阿里云模型代理 · \(running ? "运行中" : "已停止")"
+    }
+
+    private func performBackendOperation(
+        resultRunning: Bool,
+        openPageOnSuccess: Bool = false,
+        operation: @escaping (BackendController) throws -> Void
+    ) {
+        guard !operationInProgress else { return }
+        operationInProgress = true
+        toggleMenuItem.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let key = try backend.clientKey()
+                try operation(self.backend)
                 DispatchQueue.main.async {
-                    self.clientKey = key
-                    self.clientKeyValue.stringValue = key
-                    self.refreshStatus()
+                    self.operationInProgress = false
+                    self.setStatus(
+                        title: resultRunning ? "代理服务运行中" : "代理服务已停止",
+                        running: resultRunning
+                    )
+                    if openPageOnSuccess { NSWorkspace.shared.open(managementURL) }
                 }
+            } catch {
+                DispatchQueue.main.async {
+                    self.operationInProgress = false
+                    self.setStatus(title: "服务操作失败", running: false)
+                    self.showError(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    @objc func openManagementPage() {
+        if serviceRunning {
+            NSWorkspace.shared.open(managementURL)
+            return
+        }
+        setStatus(title: "正在启动服务…", running: false)
+        performBackendOperation(resultRunning: true, openPageOnSuccess: true) { backend in
+            try backend.start()
+        }
+    }
+
+    @objc private func toggleService() {
+        let shouldStop = serviceRunning
+        setStatus(title: shouldStop ? "正在停止服务…" : "正在启动服务…", running: serviceRunning)
+        performBackendOperation(resultRunning: !shouldStop) { backend in
+            if shouldStop { try backend.stop() } else { try backend.start() }
+        }
+    }
+
+    @objc private func copyBaseURL() {
+        copy("http://\(localIPv4Address()):\(servicePort)/v1")
+    }
+
+    @objc private func copyClientKey() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let key = try self.backend.clientKey()
+                DispatchQueue.main.async { self.copy(key) }
             } catch {
                 DispatchQueue.main.async { self.showError(error.localizedDescription) }
             }
         }
     }
 
-    private func refreshStatus() {
-        guard !clientKey.isEmpty else { return }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(servicePort)/v1/proxy/status")!)
-        request.timeoutInterval = 1.5
-        request.setValue("Bearer \(clientKey)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
-            guard let self else { return }
-            let status = data.flatMap { try? JSONDecoder().decode(ProxyStatus.self, from: $0) }
-            let ok = (response as? HTTPURLResponse)?.statusCode == 200 && status != nil
-            DispatchQueue.main.async {
-                self.serviceRunning = ok
-                self.statusDot.layer?.backgroundColor = (ok ? NSColor.systemGreen : NSColor.systemOrange).cgColor
-                self.statusLabel.stringValue = ok ? "代理运行中" : "代理未运行"
-                self.toggleButton.title = ok ? "停止服务" : "启动服务"
-                if let status {
-                    self.modelsValue.stringValue = String(status.available_models)
-                    self.requestsValue.stringValue = String(status.client.requests)
-                    self.uptimeValue.stringValue = self.formatUptime(status.uptime_seconds)
-                } else {
-                    self.modelsValue.stringValue = "—"
-                    self.requestsValue.stringValue = "—"
-                    self.uptimeValue.stringValue = "—"
-                }
-            }
-        }.resume()
-    }
-
-    @objc private func saveAndStart() {
-        let key = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard key.count >= 8, key.count <= 4096, !key.contains("\n"), !key.contains("\r") else {
-            showError("API Key 长度或格式不正确。")
-            return
-        }
-        setBusy(true, message: "正在保存并启动…")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                try backend.saveUpstreamKey(key)
-                try backend.start()
-                DispatchQueue.main.async {
-                    self.apiKeyField.stringValue = ""
-                    self.setBusy(false, message: "API Key 已保存，局域网代理已启动。")
-                    self.refreshStatus()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setBusy(false, message: error.localizedDescription, isError: true)
-                    self.refreshStatus()
-                }
-            }
-        }
-    }
-
-    @objc private func toggleService() {
-        setBusy(true, message: serviceRunning ? "正在停止…" : "正在启动…")
-        let shouldStop = serviceRunning
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                if shouldStop { try backend.stop() } else { try backend.start() }
-                DispatchQueue.main.async {
-                    self.setBusy(false, message: shouldStop ? "代理已停止。" : "代理已启动。")
-                    self.refreshStatus()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setBusy(false, message: error.localizedDescription, isError: true)
-                    self.refreshStatus()
-                }
-            }
-        }
-    }
-
-    private func setBusy(_ busy: Bool, message: String, isError: Bool = false) {
-        saveButton.isEnabled = !busy
-        toggleButton.isEnabled = !busy
-        messageLabel.stringValue = message
-        messageLabel.textColor = isError ? .systemRed : .secondaryLabelColor
-    }
-
-    private func showError(_ message: String) {
-        setBusy(false, message: message, isError: true)
-    }
-
-    private func formatUptime(_ seconds: Int) -> String {
-        if seconds < 3600 { return "\(seconds / 60) 分钟" }
-        if seconds < 86_400 { return String(format: "%.1f 小时", Double(seconds) / 3600) }
-        return String(format: "%.1f 天", Double(seconds) / 86_400)
-    }
+    @objc private func copyModelAlias() { copy(modelAlias) }
 
     private func copy(_ value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        messageLabel.stringValue = "已复制到剪贴板。"
-        messageLabel.textColor = .secondaryLabelColor
     }
 
-    @objc private func copyBaseURL() { copy(baseURLValue.stringValue) }
-    @objc private func copyClientKey() { copy(clientKeyValue.stringValue) }
-    @objc private func copyModel() { copy(modelValue.stringValue) }
+    @objc private func stopAndQuit() {
+        operationInProgress = true
+        toggleMenuItem.isEnabled = false
+        statusMenuItem.title = "正在停止服务…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.backend.stop()
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            } catch {
+                DispatchQueue.main.async {
+                    self.operationInProgress = false
+                    self.showError(error.localizedDescription)
+                    self.refreshStatus()
+                }
+            }
+        }
+    }
+
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "阿里云模型代理"
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
 }
 
 private func localIPv4Address() -> String {
@@ -459,40 +311,18 @@ private func localIPv4Address() -> String {
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var mainWindow: MainWindowController?
+    private var menuBarController: MenuBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        installMenu()
-        let controller = MainWindowController()
-        mainWindow = controller
-        controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        controller.startMonitoring()
+        NSApp.setActivationPolicy(.accessory)
+        let controller = MenuBarController()
+        menuBarController = controller
+        controller.launch()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-
-    private func installMenu() {
-        let mainMenu = NSMenu()
-        let appItem = NSMenuItem()
-        mainMenu.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于阿里云模型代理", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-
-        let editItem = NSMenuItem()
-        mainMenu.addItem(editItem)
-        let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = editMenu
-        NSApp.mainMenu = mainMenu
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menuBarController?.openManagementPage()
+        return true
     }
 }
 

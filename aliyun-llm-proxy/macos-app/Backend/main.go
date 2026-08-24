@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -52,6 +53,9 @@ var defaultModels = []string{
 	"qwen3.6-plus-2026-04-02",
 	"qwen3-30b-a3b-instruct-2507",
 }
+
+//go:embed web/*
+var managementWeb embed.FS
 
 type modelConfig struct {
 	ID      string `json:"id"`
@@ -273,6 +277,16 @@ func (s *service) reloadUpstreamKey() error {
 	return nil
 }
 
+func (s *service) updateUpstreamKey(value string) error {
+	if err := writeSecret("dashscope.key", value); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.upstreamKey = strings.TrimSpace(value)
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *service) authorized(header, clientKey string) bool {
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
@@ -414,7 +428,148 @@ func (s *service) status() map[string]any {
 	}
 }
 
+func localIPv4Address() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	type candidate struct {
+		name string
+		ip   string
+	}
+	var candidates []candidate
+	for _, item := range interfaces {
+		if item.Flags&net.FlagUp == 0 || item.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, addressErr := item.Addrs()
+		if addressErr != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ip, _, parseErr := net.ParseCIDR(address.String())
+			if parseErr != nil || ip == nil || ip.IsLoopback() || ip.To4() == nil || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			candidates = append(candidates, candidate{name: item.Name, ip: ip.String()})
+		}
+	}
+	for _, preferred := range []string{"en0", "en1"} {
+		for _, item := range candidates {
+			if item.name == preferred {
+				return item.ip
+			}
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0].ip
+	}
+	return "127.0.0.1"
+}
+
+func (s *service) managementStatus(clientKey string) map[string]any {
+	status := s.status()
+	s.mu.Lock()
+	configured := s.upstreamKey != ""
+	s.mu.Unlock()
+	status["status"] = "running"
+	status["configured"] = configured
+	status["base_url"] = fmt.Sprintf("http://%s:%d/v1", localIPv4Address(), s.cfg.Port)
+	status["client_key"] = clientKey
+	return status
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func serveManagementAsset(w http.ResponseWriter, path string) bool {
+	name := ""
+	contentType := ""
+	switch path {
+	case "/", "/index.html":
+		name = "web/index.html"
+		contentType = "text/html; charset=utf-8"
+	case "/assets/app.css":
+		name = "web/app.css"
+		contentType = "text/css; charset=utf-8"
+	case "/assets/app.js":
+		name = "web/app.js"
+		contentType = "text/javascript; charset=utf-8"
+	default:
+		return false
+	}
+	data, err := managementWeb.ReadFile(name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "asset_error", "message": "Management page is unavailable."}})
+		return true
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+	return true
+}
+
+func (s *service) handleManagement(w http.ResponseWriter, r *http.Request, clientKey string, path string) bool {
+	isAsset := path == "/" || path == "/index.html" || strings.HasPrefix(path, "/assets/")
+	isAPI := strings.HasPrefix(path, "/admin/")
+	if !isAsset && !isAPI {
+		return false
+	}
+	if !isLoopbackRequest(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "local_only", "message": "Management is only available on this Mac."}})
+		return true
+	}
+	if isAsset {
+		if r.Method != http.MethodGet || !serveManagementAsset(w, path) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "Page not found."}})
+		}
+		return true
+	}
+	switch {
+	case r.Method == http.MethodGet && path == "/admin/status":
+		writeJSON(w, http.StatusOK, s.managementStatus(clientKey))
+	case r.Method == http.MethodPost && path == "/admin/upstream-key":
+		if r.Header.Get("X-Aliyun-Proxy-Admin") != "1" {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "admin_header_required", "message": "管理请求缺少本机控制标记。"}})
+			return true
+		}
+		var body struct {
+			APIKey string `json:"api_key"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxKeySize+1024))
+		if err := decoder.Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json", "message": "请求格式不正确。"}})
+			return true
+		}
+		if err := s.updateUpstreamKey(body.APIKey); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_api_key", "message": err.Error()}})
+			return true
+		}
+		writeJSON(w, http.StatusOK, s.managementStatus(clientKey))
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "Endpoint not found."}})
+	}
+	return true
+}
+
 func (s *service) handleChat(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	configured := s.upstreamKey != ""
+	s.mu.Unlock()
+	if !configured {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "upstream_not_configured", "message": "Configure the Aliyun DashScope API Key on this Mac first."}})
+		return
+	}
 	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestSize))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_request", "message": "Invalid request size."}})
@@ -528,12 +683,15 @@ func (s *service) handleChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *service) handler(clientKey string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		addCORS(w)
 		path := strings.TrimRight(r.URL.Path, "/")
 		if path == "" {
 			path = "/"
 		}
+		if s.handleManagement(w, r, clientKey, path) {
+			return
+		}
 		if r.Method == http.MethodOptions {
+			addCORS(w)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -541,6 +699,7 @@ func (s *service) handler(clientKey string) http.Handler {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
+		addCORS(w)
 		if !s.authorized(r.Header.Get("Authorization"), clientKey) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "invalid_api_key", "message": "Invalid local proxy API key."}})
 			return
@@ -623,9 +782,6 @@ func serve() error {
 		return err
 	}
 	upstreamKey := readSecret("dashscope.key")
-	if upstreamKey == "" {
-		return errors.New("Aliyun DashScope API Key is not configured")
-	}
 	svc := newService(cfg, upstreamKey)
 	server := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
@@ -680,9 +836,6 @@ func start() error {
 	clientKey, err := ensureClientKey()
 	if err != nil {
 		return err
-	}
-	if readSecret("dashscope.key") == "" {
-		return errors.New("Aliyun DashScope API Key is not configured")
 	}
 	if localHealth(cfg, clientKey) {
 		return nil
