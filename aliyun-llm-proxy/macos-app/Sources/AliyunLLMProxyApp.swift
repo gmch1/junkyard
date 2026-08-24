@@ -89,6 +89,7 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     private var serviceRunning = false
     private var refreshTimer: Timer?
     private var operationInProgress = false
+    private var managementOpenPending = false
 
     override init() {
         super.init()
@@ -145,8 +146,9 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func launch() {
+        managementOpenPending = true
         setStatus(title: "正在启动服务…", running: false)
-        performBackendOperation(resultRunning: true, openPageOnSuccess: true) { backend in
+        performBackendOperation(resultRunning: true) { backend in
             try backend.start()
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
@@ -179,7 +181,6 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func performBackendOperation(
         resultRunning: Bool,
-        openPageOnSuccess: Bool = false,
         operation: @escaping (BackendController) throws -> Void
     ) {
         guard !operationInProgress else { return }
@@ -195,11 +196,12 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
                         title: resultRunning ? "代理服务运行中" : "代理服务已停止",
                         running: resultRunning
                     )
-                    if openPageOnSuccess { NSWorkspace.shared.open(managementURL) }
+                    self.continuePendingManagementOpen(serviceRunning: resultRunning)
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.operationInProgress = false
+                    self.managementOpenPending = false
                     self.setStatus(title: "服务操作失败", running: false)
                     self.showError(error.localizedDescription)
                 }
@@ -208,13 +210,67 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc func openManagementPage() {
+        managementOpenPending = true
+        if operationInProgress {
+            statusMenuItem.title = "服务就绪后将打开管理页面…"
+            return
+        }
+        setStatus(title: "正在检查管理服务…", running: serviceRunning)
+        performBackendOperation(resultRunning: true) { backend in
+            try backend.start()
+        }
+    }
+
+    private func continuePendingManagementOpen(serviceRunning: Bool) {
+        guard managementOpenPending else { return }
         if serviceRunning {
-            NSWorkspace.shared.open(managementURL)
+            scheduleBrowserOpen()
             return
         }
         setStatus(title: "正在启动服务…", running: false)
-        performBackendOperation(resultRunning: true, openPageOnSuccess: true) { backend in
+        performBackendOperation(resultRunning: true) { backend in
             try backend.start()
+        }
+    }
+
+    private func scheduleBrowserOpen() {
+        guard managementOpenPending else { return }
+        managementOpenPending = false
+        DispatchQueue.main.async { [weak self] in
+            self?.openBrowserUsingWorkspace()
+        }
+    }
+
+    private func openBrowserUsingWorkspace() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        NSWorkspace.shared.open(managementURL, configuration: configuration) { [weak self] _, error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                self?.openBrowserUsingSystemTool(workspaceError: error)
+            }
+        }
+    }
+
+    private func openBrowserUsingSystemTool(workspaceError: Error) {
+        let process = Process()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [managementURL.absoluteString]
+        process.standardError = errorPipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus != 0 else { return }
+            let detail = String(
+                data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            )?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = detail?.isEmpty == false ? detail : nil
+            showError(message ?? workspaceError.localizedDescription)
+        } catch {
+            showError("无法打开管理页面：\(error.localizedDescription)")
         }
     }
 

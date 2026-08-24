@@ -769,6 +769,21 @@ func localHealth(cfg config, clientKey string) bool {
 	return response.StatusCode == http.StatusOK
 }
 
+func localManagementHealth(cfg config) bool {
+	host := cfg.Host
+	if host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	request, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s:%d/admin/status", host, cfg.Port), nil)
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	return response.StatusCode == http.StatusOK
+}
+
 func serve() error {
 	if err := ensureStateDirectory(); err != nil {
 		return err
@@ -838,7 +853,12 @@ func start() error {
 		return err
 	}
 	if localHealth(cfg, clientKey) {
-		return nil
+		if localManagementHealth(cfg) {
+			return nil
+		}
+		if err := stop(); err != nil {
+			return fmt.Errorf("could not replace the legacy proxy service: %w", err)
+		}
 	}
 	executable, err := os.Executable()
 	if err != nil {

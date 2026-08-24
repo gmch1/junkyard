@@ -3,6 +3,7 @@ package main // macOS bundled backend
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -253,5 +254,32 @@ func TestChatExplainsMissingUpstreamConfiguration(t *testing.T) {
 	svc.handler("ap-client").ServeHTTP(result, request)
 	if result.Code != http.StatusServiceUnavailable || !strings.Contains(result.Body.String(), "upstream_not_configured") {
 		t.Fatalf("missing configuration status = %d, body = %s", result.Code, result.Body.String())
+	}
+}
+
+func TestLocalManagementHealthDistinguishesLegacyService(t *testing.T) {
+	management := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/status" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
+	}))
+	defer management.Close()
+
+	cfg := testConfig("https://example.invalid", "model-one")
+	cfg.Host = "127.0.0.1"
+	cfg.Port = management.Listener.Addr().(*net.TCPAddr).Port
+	if !localManagementHealth(cfg) {
+		t.Fatal("current management service was not detected")
+	}
+
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"status": "unauthorized"})
+	}))
+	defer legacy.Close()
+	cfg.Port = legacy.Listener.Addr().(*net.TCPAddr).Port
+	if localManagementHealth(cfg) {
+		t.Fatal("legacy service unexpectedly passed the management capability check")
 	}
 }
