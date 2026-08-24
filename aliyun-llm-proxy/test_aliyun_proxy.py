@@ -1,5 +1,6 @@
 import json
 import logging
+import tempfile
 import threading
 import time
 import unittest
@@ -7,6 +8,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
 import aliyun_proxy
 
@@ -110,6 +113,74 @@ class ModelPoolTests(unittest.TestCase):
             chosen.append(state.model_id)
             pool.success(state, 1, {})
         self.assertEqual(chosen, ["model-a", "model-b", "model-c"])
+
+    def test_random_strategy_only_chooses_from_best_priority_and_lowest_load(self):
+        config = make_config("http://unused")
+        config["selection_strategy"] = "random_within_priority"
+        config["models"][2]["routing_priority"] = 20
+        pool = aliyun_proxy.ModelPool(config)
+
+        with mock.patch.object(
+            aliyun_proxy.secrets, "choice", side_effect=lambda candidates: candidates[-1]
+        ) as choose:
+            state = pool.acquire(set())
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state.model_id, "model-b")
+        self.assertEqual(
+            [item[3].model_id for item in choose.call_args.args[0]],
+            ["model-a", "model-b"],
+        )
+        pool.success(state, 1, {})
+
+    def test_version_8_migration_adds_models_without_removing_existing_models(self):
+        config = make_config("http://unused")
+        config["version"] = 6
+        config["models"] = [
+            {"id": "existing-600", "enabled": True, "rpm": 600, "routing_priority": 10},
+            {"id": "existing-500", "enabled": True, "rpm": 500, "routing_priority": 4},
+            {
+                "id": "existing-60",
+                "enabled": True,
+                "rpm": 60,
+                "routing_priority": 0,
+                "rate_class": "low-frequency",
+            },
+            {
+                "id": "qwen-mt-flash",
+                "enabled": True,
+                "rpm": 60,
+                "routing_priority": 0,
+                "adapter": "qwen-mt",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            config_file = state_dir / "proxy.json"
+            config_file.write_text(json.dumps(config), encoding="utf-8")
+            with (
+                mock.patch.object(aliyun_proxy, "STATE_DIR", state_dir),
+                mock.patch.object(aliyun_proxy, "CONFIG_FILE", config_file),
+            ):
+                migrated = aliyun_proxy.ensure_config()
+
+        models = {model["id"]: model for model in migrated["models"]}
+        self.assertIn("existing-600", models)
+        self.assertIn("existing-500", models)
+        self.assertIn("existing-60", models)
+        self.assertIn("qwen-mt-flash", models)
+        self.assertIn("qwen3.8-max", models)
+        self.assertIn("qwen-turbo", models)
+        self.assertIn("deepseek-v4-pro", models)
+        self.assertIn("deepseek-v3.2", models)
+        self.assertIn("kimi-k3", models)
+        self.assertIn("Moonshot-Kimi-K2-Instruct", models)
+        self.assertIn("MiniMax-M2.5", models)
+        self.assertEqual(models["qwen-mt-flash"]["routing_priority"], 0)
+        self.assertEqual(models["existing-60"]["routing_priority"], 5)
+        self.assertEqual(models["existing-600"]["routing_priority"], 10)
+        self.assertEqual(models["existing-500"]["routing_priority"], 10)
+        self.assertEqual(migrated["selection_strategy"], "random_within_priority")
 
     def test_low_frequency_models_are_preferred_then_skipped_during_interval(self):
         config = make_config("http://unused")

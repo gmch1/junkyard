@@ -41,7 +41,7 @@ LEGACY_CLIENT_KEY_FILE = ROOT / ".translategemma" / "server.key"
 DASHBOARD_DIST = ROOT / "dashboard" / "dist"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 6,
+    "version": 8,
     "host": "127.0.0.1",
     "port": 39281,
     "upstream_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -50,6 +50,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "route_wait_seconds": 2,
     "rpm_safety_ratio": 0.90,
     "default_cooldown_seconds": 60,
+    "selection_strategy": "random_within_priority",
     "hedging": {
         "enabled": True,
         "delay_seconds": 5,
@@ -62,10 +63,154 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "rpm": 15000,
             "tpm": 1200000,
             "min_interval_seconds": 30,
-            "routing_priority": -10,
+            "routing_priority": 10,
             "role": "quota-probe",
             "disable_on_allocation_quota": True,
             "disable_on_access_denied": True,
+        },
+        {
+            "id": "deepseek-v4-pro",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1200000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "deepseek-v3.2",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "deepseek-v3.1",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1200000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "deepseek-v3",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1200000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "kimi-k3",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1200000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "Moonshot-Kimi-K2-Instruct",
+            "enabled": True,
+            "rpm": 500,
+            "tpm": 1000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "MiniMax-M2.5",
+            "enabled": True,
+            "rpm": 500,
+            "tpm": 1000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "MiniMax-M2.1",
+            "enabled": True,
+            "rpm": 500,
+            "tpm": 1000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-translation",
+        },
+        {
+            "id": "qwen3.8-max",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen3.7-max",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen3-max",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen3.6-plus",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen3.5-plus",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen-plus",
+            "enabled": True,
+            "rpm": 30000,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen-plus-latest",
+            "enabled": True,
+            "rpm": 15000,
+            "tpm": 1200000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-quality",
+        },
+        {
+            "id": "qwen-turbo",
+            "enabled": True,
+            "rpm": 1200,
+            "tpm": 5000000,
+            "routing_priority": 10,
+            "rate_class": "high-throughput",
+            "role": "stable-fast",
         },
         {
             "id": "qwen3.6-flash-2026-04-16",
@@ -165,7 +310,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "rpm": 60,
             "tpm": 1000000,
             "min_interval_seconds": 30,
-            "routing_priority": 0,
+            "routing_priority": 5,
             "rate_class": "low-frequency",
             "role": "low-frequency-fast",
         },
@@ -175,7 +320,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "rpm": 60,
             "tpm": 1000000,
             "min_interval_seconds": 30,
-            "routing_priority": 0,
+            "routing_priority": 5,
             "rate_class": "low-frequency",
             "role": "low-frequency-quality",
         },
@@ -185,7 +330,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "rpm": 60,
             "tpm": 1000000,
             "min_interval_seconds": 30,
-            "routing_priority": 0,
+            "routing_priority": 5,
             "rate_class": "low-frequency",
             "role": "low-frequency-quality",
         },
@@ -510,6 +655,38 @@ def ensure_config() -> Dict[str, Any]:
             encoding="utf-8",
         )
         temporary.replace(CONFIG_FILE)
+    if int(config.get("version", 1)) < 7:
+        config["selection_strategy"] = DEFAULT_CONFIG["selection_strategy"]
+        for model in config.get("models", []):
+            if model.get("adapter") == "qwen-mt":
+                model["routing_priority"] = 0
+            elif int(model.get("rpm", 0)) == 60:
+                model["routing_priority"] = 5
+            elif int(model.get("rpm", 0)) >= 500:
+                model["routing_priority"] = 10
+        existing_ids = {str(model.get("id", "")) for model in config.get("models", [])}
+        for model in DEFAULT_CONFIG["models"]:
+            if model.get("rate_class") == "high-throughput" and model["id"] not in existing_ids:
+                config["models"].append(copy.deepcopy(model))
+        config["version"] = 7
+        temporary = CONFIG_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(CONFIG_FILE)
+    if int(config.get("version", 1)) < 8:
+        existing_ids = {str(model.get("id", "")) for model in config.get("models", [])}
+        for model in DEFAULT_CONFIG["models"]:
+            if model.get("rate_class") == "high-throughput" and model["id"] not in existing_ids:
+                config["models"].append(copy.deepcopy(model))
+        config["version"] = 8
+        temporary = CONFIG_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(CONFIG_FILE)
     validate_config(config)
     return config
 
@@ -536,6 +713,11 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise SystemExit("hedging.delay_seconds must be greater than zero")
     if int(hedging.get("max_concurrent_backups", 4)) < 1:
         raise SystemExit("hedging.max_concurrent_backups must be at least one")
+    if config.get("selection_strategy", "round_robin") not in (
+        "round_robin",
+        "random_within_priority",
+    ):
+        raise SystemExit("selection_strategy must be round_robin or random_within_priority")
 
 
 class UnavailableStore:
@@ -658,6 +840,7 @@ class ModelPool:
                 state.unavailable_reason = str(saved.get("code") or saved.get("message") or "unavailable")
         self.lock = threading.Lock()
         self.cursor = 0
+        self.selection_strategy = str(config.get("selection_strategy", "round_robin"))
         self.safety_ratio = float(config.get("rpm_safety_ratio", 0.90))
         self.route_wait_seconds = float(config.get("route_wait_seconds", 2))
 
@@ -702,7 +885,16 @@ class ModelPool:
                         continue
                     available.append((int(state.config.get("routing_priority", 10)), offset, index, state))
                 if available:
-                    _priority, _offset, index, state = min(available)
+                    if self.selection_strategy == "random_within_priority":
+                        best_priority = min(item[0] for item in available)
+                        same_priority = [item for item in available if item[0] == best_priority]
+                        lowest_in_flight = min(item[3].in_flight for item in same_priority)
+                        candidates = [
+                            item for item in same_priority if item[3].in_flight == lowest_in_flight
+                        ]
+                        _priority, _offset, index, state = secrets.choice(candidates)
+                    else:
+                        _priority, _offset, index, state = min(available)
                     state.request_times.append(now)
                     state.second_times.append(now)
                     state.in_flight += 1
