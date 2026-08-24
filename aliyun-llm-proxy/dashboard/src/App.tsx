@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -7,6 +7,7 @@ import {
   Container,
   Group,
   Loader,
+  NativeSelect,
   Paper,
   Progress,
   ScrollArea,
@@ -110,6 +111,146 @@ type MetricCardProps = {
   detail: string
   icon: typeof IconActivity
   color: string
+}
+
+type ModelSortField =
+  | 'model'
+  | 'status'
+  | 'rpm'
+  | 'adoption_rate'
+  | 'adoptions'
+  | 'attempts'
+  | 'hedge_win_rate'
+  | 'hedge_wins'
+  | 'discarded_responses'
+  | 'successes'
+  | 'failures'
+  | 'throttles'
+  | 'average_latency_ms'
+  | 'p95_latency_ms'
+  | 'last_latency_ms'
+  | 'requests_last_minute'
+  | 'input_tokens'
+  | 'output_tokens'
+  | 'total_tokens'
+type SortDirection = 'asc' | 'desc'
+type ModelSort = { field: ModelSortField; direction: SortDirection }
+type ModelStatus = 'unavailable' | 'cooldown' | 'disabled' | 'processing' | 'available'
+
+const MODEL_SORT_STORAGE_KEY = 'aliyun-proxy:model-sort:v2'
+const MODEL_SORT_OPTIONS: { value: ModelSortField; label: string }[] = [
+  { value: 'model', label: '模型名称' },
+  { value: 'status', label: '状态' },
+  { value: 'rpm', label: 'RPM' },
+  { value: 'adoption_rate', label: '采纳率' },
+  { value: 'adoptions', label: '采纳数' },
+  { value: 'attempts', label: '参与数' },
+  { value: 'hedge_win_rate', label: '竞速胜率' },
+  { value: 'hedge_wins', label: '竞速胜出数' },
+  { value: 'discarded_responses', label: '丢弃数' },
+  { value: 'successes', label: '成功数' },
+  { value: 'failures', label: '失败数' },
+  { value: 'throttles', label: '限流数' },
+  { value: 'average_latency_ms', label: '平均延迟' },
+  { value: 'p95_latency_ms', label: 'P95 延迟' },
+  { value: 'last_latency_ms', label: '最近延迟' },
+  { value: 'requests_last_minute', label: '近 1 分钟请求数' },
+  { value: 'input_tokens', label: '输入 Token' },
+  { value: 'output_tokens', label: '输出 Token' },
+  { value: 'total_tokens', label: '总 Token' },
+]
+const MODEL_SORT_SELECT_OPTIONS = [
+  { value: '', label: '选择排序指标' },
+  ...MODEL_SORT_OPTIONS,
+]
+const MODEL_SORT_FIELDS = new Set(MODEL_SORT_OPTIONS.map((option) => option.value))
+const DEFAULT_SORT_DIRECTIONS: Record<ModelSortField, SortDirection> = {
+  model: 'asc',
+  status: 'asc',
+  rpm: 'desc',
+  adoption_rate: 'desc',
+  adoptions: 'desc',
+  attempts: 'desc',
+  hedge_win_rate: 'desc',
+  hedge_wins: 'desc',
+  discarded_responses: 'desc',
+  successes: 'desc',
+  failures: 'desc',
+  throttles: 'desc',
+  average_latency_ms: 'asc',
+  p95_latency_ms: 'asc',
+  last_latency_ms: 'asc',
+  requests_last_minute: 'desc',
+  input_tokens: 'desc',
+  output_tokens: 'desc',
+  total_tokens: 'desc',
+}
+const MODEL_STATUS_RANKS: Record<ModelStatus, number> = {
+  unavailable: 0,
+  cooldown: 1,
+  disabled: 2,
+  processing: 3,
+  available: 4,
+}
+
+function loadModelSort(): ModelSort | null {
+  try {
+    const saved = window.localStorage.getItem(MODEL_SORT_STORAGE_KEY)
+    if (!saved) return null
+    const parsed = JSON.parse(saved) as { field?: unknown; direction?: unknown }
+    if (
+      typeof parsed.field !== 'string'
+      || !MODEL_SORT_FIELDS.has(parsed.field as ModelSortField)
+      || (parsed.direction !== 'asc' && parsed.direction !== 'desc')
+    ) return null
+    return { field: parsed.field as ModelSortField, direction: parsed.direction }
+  } catch {
+    return null
+  }
+}
+
+function modelStatus(model: ModelMetrics): ModelStatus {
+  if (!model.enabled) return 'disabled'
+  if (model.unavailable) return 'unavailable'
+  if (model.cooldown_seconds > 0) return 'cooldown'
+  if (model.in_flight > 0) return 'processing'
+  return 'available'
+}
+
+function modelSortValue(model: ModelMetrics, field: ModelSortField): string | number {
+  if (field === 'model') return model.id
+  if (field === 'status') return MODEL_STATUS_RANKS[modelStatus(model)]
+  if (field === 'total_tokens') return model.input_tokens + model.output_tokens
+  return model[field]
+}
+
+function hasModelSortValue(model: ModelMetrics, field: ModelSortField) {
+  if (field === 'adoption_rate') return model.attempts > 0
+  if (field === 'hedge_win_rate' || field === 'hedge_wins') {
+    return model.hedge_participations > 0
+  }
+  if (
+    field === 'average_latency_ms'
+    || field === 'p95_latency_ms'
+    || field === 'last_latency_ms'
+  ) return model.successes > 0
+  return true
+}
+
+function sortModels(models: ModelMetrics[], sort: ModelSort | null) {
+  if (!sort) return models
+  const multiplier = sort.direction === 'asc' ? 1 : -1
+  return models.toSorted((left, right) => {
+    const leftHasValue = hasModelSortValue(left, sort.field)
+    const rightHasValue = hasModelSortValue(right, sort.field)
+    if (leftHasValue !== rightHasValue) return leftHasValue ? -1 : 1
+    const leftValue = modelSortValue(left, sort.field)
+    const rightValue = modelSortValue(right, sort.field)
+    const comparison = typeof leftValue === 'string'
+      ? leftValue.localeCompare(String(rightValue), 'en')
+      : leftValue - Number(rightValue)
+    return comparison * multiplier
+  })
 }
 
 function formatInteger(value: number) {
@@ -247,6 +388,7 @@ function App() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState('')
   const [pendingModel, setPendingModel] = useState('')
+  const [modelSort, setModelSort] = useState<ModelSort | null>(loadModelSort)
 
   useEffect(() => {
     let active = true
@@ -286,6 +428,42 @@ function App() {
   const successRate = data?.client.requests
     ? (data.client.successes / data.client.requests) * 100
     : 0
+  const sortedModels = useMemo(
+    () => sortModels(data?.models ?? [], modelSort),
+    [data?.models, modelSort],
+  )
+
+  const persistModelSort = (next: ModelSort | null) => {
+    setModelSort(next)
+    try {
+      if (next) window.localStorage.setItem(MODEL_SORT_STORAGE_KEY, JSON.stringify(next))
+      else window.localStorage.removeItem(MODEL_SORT_STORAGE_KEY)
+    } catch {
+      // Keep the session preference even when browser storage is unavailable.
+    }
+  }
+
+  const updateModelSortField = (value: string | null) => {
+    if (!value || !MODEL_SORT_FIELDS.has(value as ModelSortField)) {
+      persistModelSort(null)
+      return
+    }
+    const field = value as ModelSortField
+    persistModelSort({
+      field,
+      direction: modelSort?.field === field
+        ? modelSort.direction
+        : DEFAULT_SORT_DIRECTIONS[field],
+    })
+  }
+
+  const toggleSortDirection = () => {
+    if (!modelSort) return
+    persistModelSort({
+      ...modelSort,
+      direction: modelSort.direction === 'asc' ? 'desc' : 'asc',
+    })
+  }
 
   const toggleModel = async (modelId: string, enabled: boolean) => {
     setPendingModel(modelId)
@@ -411,15 +589,35 @@ function App() {
 
           <Paper radius="lg" p="lg" withBorder>
             <Stack gap="md">
-              <Group justify="space-between">
+              <Group justify="space-between" align="flex-end">
                 <Box>
                   <Text fw={700}>模型明细</Text>
                   <Text size="sm" c="dimmed">状态、采纳率、竞速胜率、延迟、限流与 Token 用量</Text>
                 </Box>
-                <Badge variant="light">{data?.models.length ?? 0} 个模型</Badge>
+                <Group gap="sm" align="flex-end">
+                  <NativeSelect
+                    aria-label="选择模型排序指标"
+                    data={MODEL_SORT_SELECT_OPTIONS}
+                    value={modelSort?.field ?? ''}
+                    onChange={(event) => updateModelSortField(event.currentTarget.value || null)}
+                    size="xs"
+                    w={180}
+                  />
+                  {modelSort ? (
+                    <Button size="xs" variant="default" onClick={toggleSortDirection}>
+                      {modelSort.direction === 'asc' ? '升序 ↑' : '降序 ↓'}
+                    </Button>
+                  ) : null}
+                  {modelSort ? (
+                    <Button size="xs" variant="subtle" color="gray" onClick={() => persistModelSort(null)}>
+                      取消排序
+                    </Button>
+                  ) : null}
+                  <Badge variant="light">{data?.models.length ?? 0} 个模型</Badge>
+                </Group>
               </Group>
               <ModelsTable
-                models={data?.models ?? []}
+                models={sortedModels}
                 pendingModel={pendingModel}
                 onToggle={toggleModel}
               />
