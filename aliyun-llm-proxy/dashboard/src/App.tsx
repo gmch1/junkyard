@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -28,8 +28,6 @@ import {
   IconTrophy,
 } from '@tabler/icons-react'
 import './App.css'
-
-const ChartPanels = lazy(() => import('./Charts'))
 
 type ClientMetrics = {
   requests: number
@@ -145,21 +143,6 @@ function MetricCard({ title, value, detail, icon: Icon, color }: MetricCardProps
         </ThemeIcon>
       </Group>
     </Paper>
-  )
-}
-
-function ChartsFallback() {
-  return (
-    <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="lg">
-      {['响应采纳', '模型响应延迟'].map((title) => (
-        <Paper key={title} radius="lg" p="lg" withBorder>
-          <Stack gap="md">
-            <Text fw={700}>{title}</Text>
-            <Box className="empty-chart"><Loader size="sm" /></Box>
-          </Stack>
-        </Paper>
-      ))}
-    </SimpleGrid>
   )
 }
 
@@ -349,10 +332,6 @@ function App() {
               color="grape"
             />
           </SimpleGrid>
-
-          <Suspense fallback={<ChartsFallback />}>
-            <ChartPanels models={data?.models ?? []} />
-          </Suspense>
 
           <Paper radius="lg" p="lg" withBorder>
             <Stack gap="md">
