@@ -7,7 +7,6 @@ import {
   Container,
   Group,
   Loader,
-  NativeSelect,
   Paper,
   Progress,
   ScrollArea,
@@ -17,6 +16,7 @@ import {
   Text,
   ThemeIcon,
   Title,
+  UnstyledButton,
 } from '@mantine/core'
 import { useDocumentTitle } from '@mantine/hooks'
 import { notifications } from '@mantine/notifications'
@@ -122,6 +122,7 @@ type ModelSortField =
   | 'attempts'
   | 'hedge_win_rate'
   | 'hedge_wins'
+  | 'hedge_participations'
   | 'discarded_responses'
   | 'successes'
   | 'failures'
@@ -147,6 +148,7 @@ const MODEL_SORT_OPTIONS: { value: ModelSortField; label: string }[] = [
   { value: 'attempts', label: '参与数' },
   { value: 'hedge_win_rate', label: '竞速胜率' },
   { value: 'hedge_wins', label: '竞速胜出数' },
+  { value: 'hedge_participations', label: '竞速参与数' },
   { value: 'discarded_responses', label: '丢弃数' },
   { value: 'successes', label: '成功数' },
   { value: 'failures', label: '失败数' },
@@ -159,10 +161,6 @@ const MODEL_SORT_OPTIONS: { value: ModelSortField; label: string }[] = [
   { value: 'output_tokens', label: '输出 Token' },
   { value: 'total_tokens', label: '总 Token' },
 ]
-const MODEL_SORT_SELECT_OPTIONS = [
-  { value: '', label: '选择排序指标' },
-  ...MODEL_SORT_OPTIONS,
-]
 const MODEL_SORT_FIELDS = new Set(MODEL_SORT_OPTIONS.map((option) => option.value))
 const DEFAULT_SORT_DIRECTIONS: Record<ModelSortField, SortDirection> = {
   model: 'asc',
@@ -173,6 +171,7 @@ const DEFAULT_SORT_DIRECTIONS: Record<ModelSortField, SortDirection> = {
   attempts: 'desc',
   hedge_win_rate: 'desc',
   hedge_wins: 'desc',
+  hedge_participations: 'desc',
   discarded_responses: 'desc',
   successes: 'desc',
   failures: 'desc',
@@ -226,7 +225,11 @@ function modelSortValue(model: ModelMetrics, field: ModelSortField): string | nu
 
 function hasModelSortValue(model: ModelMetrics, field: ModelSortField) {
   if (field === 'adoption_rate') return model.attempts > 0
-  if (field === 'hedge_win_rate' || field === 'hedge_wins') {
+  if (
+    field === 'hedge_win_rate'
+    || field === 'hedge_wins'
+    || field === 'hedge_participations'
+  ) {
     return model.hedge_participations > 0
   }
   if (
@@ -299,26 +302,124 @@ function MetricCard({ title, value, detail, icon: Icon, color }: MetricCardProps
 type ModelsTableProps = {
   models: ModelMetrics[]
   pendingModel: string
+  sort: ModelSort | null
   onToggle: (modelId: string, enabled: boolean) => void
+  onSort: (field: ModelSortField) => void
 }
 
-function ModelsTable({ models, pendingModel, onToggle }: ModelsTableProps) {
+type SortableTableHeaderProps = {
+  options: { field: ModelSortField; label: string }[]
+  sort: ModelSort | null
+  onSort: (field: ModelSortField) => void
+  align?: 'left' | 'right'
+}
+
+function SortableTableHeader({
+  options,
+  sort,
+  onSort,
+  align = 'left',
+}: SortableTableHeaderProps) {
+  const activeOption = options.find((option) => option.field === sort?.field)
+  const ariaSort = activeOption
+    ? sort?.direction === 'asc' ? 'ascending' : 'descending'
+    : 'none'
+
+  return (
+    <Table.Th ta={align} aria-sort={ariaSort}>
+      <Group
+        className="sortable-header-options"
+        data-align={align}
+        gap={4}
+        wrap="nowrap"
+      >
+        {options.map((option, index) => {
+          const active = option.field === sort?.field
+          const nextDirection = active
+            ? sort.direction === 'asc' ? '降序' : '升序'
+            : DEFAULT_SORT_DIRECTIONS[option.field] === 'asc' ? '升序' : '降序'
+          return (
+            <Group key={option.field} gap={4} wrap="nowrap">
+              {index > 0 ? <span className="sortable-header-separator">/</span> : null}
+              <UnstyledButton
+                type="button"
+                className="sortable-header-button"
+                data-active={active || undefined}
+                onClick={() => onSort(option.field)}
+                aria-label={`按${option.label}${nextDirection}排列`}
+                title={`按${option.label}${nextDirection}排列`}
+              >
+                <span>{option.label}</span>
+                <span className="sortable-header-indicator" aria-hidden="true">
+                  {active ? sort.direction === 'asc' ? '↑' : '↓' : '↕'}
+                </span>
+              </UnstyledButton>
+            </Group>
+          )
+        })}
+      </Group>
+    </Table.Th>
+  )
+}
+
+function ModelsTable({ models, pendingModel, sort, onToggle, onSort }: ModelsTableProps) {
   return (
     <ScrollArea>
       <Table className="models-table" verticalSpacing="sm" horizontalSpacing="md" miw={1550}>
         <Table.Thead>
           <Table.Tr>
-            <Table.Th>模型</Table.Th>
-            <Table.Th>状态</Table.Th>
-            <Table.Th>采纳率</Table.Th>
-            <Table.Th ta="right">采纳 / 参与</Table.Th>
-            <Table.Th ta="right">竞速胜出</Table.Th>
-            <Table.Th ta="right">丢弃</Table.Th>
-            <Table.Th ta="right">成功 / 失败</Table.Th>
-            <Table.Th ta="right">限流</Table.Th>
-            <Table.Th ta="right">平均 / P95 / 最近</Table.Th>
-            <Table.Th ta="right">近 1 分钟</Table.Th>
-            <Table.Th ta="right">输入 / 输出 Token</Table.Th>
+            <SortableTableHeader
+              options={[{ field: 'model', label: '模型' }, { field: 'rpm', label: 'RPM' }]}
+              sort={sort}
+              onSort={onSort}
+            />
+            <SortableTableHeader options={[{ field: 'status', label: '状态' }]} sort={sort} onSort={onSort} />
+            <SortableTableHeader options={[{ field: 'adoption_rate', label: '采纳率' }]} sort={sort} onSort={onSort} />
+            <SortableTableHeader
+              options={[{ field: 'adoptions', label: '采纳' }, { field: 'attempts', label: '参与' }]}
+              sort={sort}
+              onSort={onSort}
+              align="right"
+            />
+            <SortableTableHeader
+              options={[
+                { field: 'hedge_wins', label: '胜出' },
+                { field: 'hedge_participations', label: '参与' },
+                { field: 'hedge_win_rate', label: '胜率' },
+              ]}
+              sort={sort}
+              onSort={onSort}
+              align="right"
+            />
+            <SortableTableHeader options={[{ field: 'discarded_responses', label: '丢弃' }]} sort={sort} onSort={onSort} align="right" />
+            <SortableTableHeader
+              options={[{ field: 'successes', label: '成功' }, { field: 'failures', label: '失败' }]}
+              sort={sort}
+              onSort={onSort}
+              align="right"
+            />
+            <SortableTableHeader options={[{ field: 'throttles', label: '限流' }]} sort={sort} onSort={onSort} align="right" />
+            <SortableTableHeader
+              options={[
+                { field: 'average_latency_ms', label: '平均' },
+                { field: 'p95_latency_ms', label: 'P95' },
+                { field: 'last_latency_ms', label: '最近' },
+              ]}
+              sort={sort}
+              onSort={onSort}
+              align="right"
+            />
+            <SortableTableHeader options={[{ field: 'requests_last_minute', label: '近 1 分钟' }]} sort={sort} onSort={onSort} align="right" />
+            <SortableTableHeader
+              options={[
+                { field: 'input_tokens', label: '输入' },
+                { field: 'output_tokens', label: '输出' },
+                { field: 'total_tokens', label: '总 Token' },
+              ]}
+              sort={sort}
+              onSort={onSort}
+              align="right"
+            />
             <Table.Th ta="right" className="models-action-cell">操作</Table.Th>
           </Table.Tr>
         </Table.Thead>
@@ -443,25 +544,12 @@ function App() {
     }
   }
 
-  const updateModelSortField = (value: string | null) => {
-    if (!value || !MODEL_SORT_FIELDS.has(value as ModelSortField)) {
-      persistModelSort(null)
-      return
-    }
-    const field = value as ModelSortField
+  const toggleModelSort = (field: ModelSortField) => {
     persistModelSort({
       field,
       direction: modelSort?.field === field
-        ? modelSort.direction
+        ? modelSort.direction === 'asc' ? 'desc' : 'asc'
         : DEFAULT_SORT_DIRECTIONS[field],
-    })
-  }
-
-  const toggleSortDirection = () => {
-    if (!modelSort) return
-    persistModelSort({
-      ...modelSort,
-      direction: modelSort.direction === 'asc' ? 'desc' : 'asc',
     })
   }
 
@@ -519,9 +607,6 @@ function App() {
                 </ThemeIcon>
                 <Title order={1}>模型代理运行统计</Title>
               </Group>
-              <Text c="dimmed">
-                阿里云百炼多模型路由 · 数据每 2 秒刷新 · 累计统计每 {data?.metrics_persistence.flush_interval_seconds ?? 5} 秒写入 SQLite
-              </Text>
             </Stack>
             <Group gap="xs">
               {data ? <Badge color="teal" variant="dot">代理运行中</Badge> : <Loader size="xs" />}
@@ -589,37 +674,22 @@ function App() {
 
           <Paper radius="lg" p="lg" withBorder>
             <Stack gap="md">
-              <Group justify="space-between" align="flex-end">
-                <Box>
-                  <Text fw={700}>模型明细</Text>
-                  <Text size="sm" c="dimmed">状态、采纳率、竞速胜率、延迟、限流与 Token 用量</Text>
-                </Box>
-                <Group gap="sm" align="flex-end">
-                  <NativeSelect
-                    aria-label="选择模型排序指标"
-                    data={MODEL_SORT_SELECT_OPTIONS}
-                    value={modelSort?.field ?? ''}
-                    onChange={(event) => updateModelSortField(event.currentTarget.value || null)}
-                    size="xs"
-                    w={180}
-                  />
-                  {modelSort ? (
-                    <Button size="xs" variant="default" onClick={toggleSortDirection}>
-                      {modelSort.direction === 'asc' ? '升序 ↑' : '降序 ↓'}
-                    </Button>
-                  ) : null}
+              <Group justify="space-between" align="center">
+                <Text fw={700}>模型明细</Text>
+                <Group gap="xs">
                   {modelSort ? (
                     <Button size="xs" variant="subtle" color="gray" onClick={() => persistModelSort(null)}>
                       取消排序
                     </Button>
                   ) : null}
-                  <Badge variant="light">{data?.models.length ?? 0} 个模型</Badge>
                 </Group>
               </Group>
               <ModelsTable
                 models={sortedModels}
                 pendingModel={pendingModel}
+                sort={modelSort}
                 onToggle={toggleModel}
+                onSort={toggleModelSort}
               />
             </Stack>
           </Paper>

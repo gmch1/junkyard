@@ -42,6 +42,56 @@ body {
   white-space: nowrap;
 }
 
+.sortable-header-options[data-align='right'] {
+  justify-content: flex-end;
+}
+
+.sortable-header-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 5px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sortable-header-button:hover,
+.sortable-header-button:focus-visible,
+.sortable-header-button[data-active] {
+  color: var(--mantine-color-blue-7);
+}
+
+.sortable-header-button:focus-visible {
+  outline: 2px solid var(--mantine-color-blue-4);
+  outline-offset: 2px;
+}
+
+.sortable-header-indicator {
+  width: 0.8em;
+  color: var(--mantine-color-gray-5);
+  font-size: 0.88em;
+  opacity: 0;
+  text-align: center;
+}
+
+.sortable-header-button:hover .sortable-header-indicator,
+.sortable-header-button:focus-visible .sortable-header-indicator,
+.sortable-header-button[data-active] .sortable-header-indicator {
+  opacity: 1;
+}
+
+.sortable-header-button[data-active] .sortable-header-indicator {
+  color: var(--mantine-color-blue-7);
+}
+
+.sortable-header-separator {
+  color: var(--mantine-color-gray-4);
+}
+
 .models-table tbody tr:hover {
   background: rgba(34, 139, 230, 0.035);
 }
