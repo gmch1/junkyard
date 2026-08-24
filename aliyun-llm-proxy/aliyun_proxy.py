@@ -15,6 +15,7 @@ import queue
 import re
 import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -37,11 +38,12 @@ UPSTREAM_KEY_FILE = STATE_DIR / "dashscope.key"
 PID_FILE = STATE_DIR / "proxy.pid"
 LOG_FILE = STATE_DIR / "proxy.log"
 UNAVAILABLE_FILE = STATE_DIR / "unavailable_models.json"
+METRICS_FILE = STATE_DIR / "metrics.sqlite3"
 LEGACY_CLIENT_KEY_FILE = ROOT / ".translategemma" / "server.key"
 DASHBOARD_DIST = ROOT / "dashboard" / "dist"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 8,
+    "version": 9,
     "host": "127.0.0.1",
     "port": 39281,
     "upstream_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -51,6 +53,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rpm_safety_ratio": 0.90,
     "default_cooldown_seconds": 60,
     "selection_strategy": "random_within_priority",
+    "metrics_flush_interval_seconds": 5,
     "hedging": {
         "enabled": True,
         "delay_seconds": 5,
@@ -687,6 +690,18 @@ def ensure_config() -> Dict[str, Any]:
             encoding="utf-8",
         )
         temporary.replace(CONFIG_FILE)
+    if int(config.get("version", 1)) < 9:
+        config.setdefault(
+            "metrics_flush_interval_seconds",
+            DEFAULT_CONFIG["metrics_flush_interval_seconds"],
+        )
+        config["version"] = 9
+        temporary = CONFIG_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(CONFIG_FILE)
     validate_config(config)
     return config
 
@@ -718,6 +733,8 @@ def validate_config(config: Dict[str, Any]) -> None:
         "random_within_priority",
     ):
         raise SystemExit("selection_strategy must be round_robin or random_within_priority")
+    if float(config.get("metrics_flush_interval_seconds", 5)) <= 0:
+        raise SystemExit("metrics_flush_interval_seconds must be greater than zero")
 
 
 class UnavailableStore:
@@ -768,6 +785,193 @@ class UnavailableStore:
                 count = 1 if self.data.pop(model_id, None) is not None else 0
             self._save()
             return count
+
+
+class MetricsStore:
+    def __init__(self, path: Optional[Path]) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.last_flushed_at = 0.0
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    def _connect(self) -> sqlite3.Connection:
+        assert self.path is not None
+        connection = sqlite3.connect(str(self.path), timeout=5)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        return connection
+
+    def _initialize(self) -> None:
+        with self.lock, self._connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS proxy_metrics (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    client_requests INTEGER NOT NULL DEFAULT 0,
+                    client_successes INTEGER NOT NULL DEFAULT 0,
+                    client_failures INTEGER NOT NULL DEFAULT 0,
+                    client_total_latency_ms REAL NOT NULL DEFAULT 0,
+                    client_latencies_json TEXT NOT NULL DEFAULT '[]',
+                    hedged_requests INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS model_metrics (
+                    model_id TEXT PRIMARY KEY,
+                    successes INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    throttles INTEGER NOT NULL DEFAULT 0,
+                    total_latency_ms REAL NOT NULL DEFAULT 0,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    adoptions INTEGER NOT NULL DEFAULT 0,
+                    hedge_participations INTEGER NOT NULL DEFAULT 0,
+                    hedge_wins INTEGER NOT NULL DEFAULT 0,
+                    discarded_responses INTEGER NOT NULL DEFAULT 0,
+                    latencies_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+                """
+            )
+
+    @staticmethod
+    def _latencies(value: str, limit: int) -> List[float]:
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        output = []
+        for item in payload[-limit:]:
+            try:
+                output.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return output
+
+    def load(self) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        if self.path is None:
+            return {}, {}
+        with self.lock, self._connect() as connection:
+            proxy_row = connection.execute(
+                "SELECT client_requests, client_successes, client_failures, "
+                "client_total_latency_ms, client_latencies_json, hedged_requests, updated_at "
+                "FROM proxy_metrics WHERE id = 1"
+            ).fetchone()
+            model_rows = connection.execute(
+                "SELECT model_id, successes, failures, throttles, total_latency_ms, "
+                "input_tokens, output_tokens, adoptions, hedge_participations, hedge_wins, "
+                "discarded_responses, latencies_json FROM model_metrics"
+            ).fetchall()
+        client: Dict[str, Any] = {}
+        if proxy_row is not None:
+            client = {
+                "requests": int(proxy_row[0]),
+                "successes": int(proxy_row[1]),
+                "failures": int(proxy_row[2]),
+                "total_latency_ms": float(proxy_row[3]),
+                "latencies_ms": self._latencies(str(proxy_row[4]), 500),
+                "hedged_requests": int(proxy_row[5]),
+            }
+            self.last_flushed_at = float(proxy_row[6])
+        models = {
+            str(row[0]): {
+                "successes": int(row[1]),
+                "failures": int(row[2]),
+                "throttles": int(row[3]),
+                "total_latency_ms": float(row[4]),
+                "input_tokens": int(row[5]),
+                "output_tokens": int(row[6]),
+                "adoptions": int(row[7]),
+                "hedge_participations": int(row[8]),
+                "hedge_wins": int(row[9]),
+                "discarded_responses": int(row[10]),
+                "latencies_ms": self._latencies(str(row[11]), 200),
+            }
+            for row in model_rows
+        }
+        return client, models
+
+    def flush(self, client: Dict[str, Any], models: List[Dict[str, Any]]) -> None:
+        if self.path is None:
+            return
+        flushed_at = time.time()
+        proxy_values = (
+            1,
+            int(client["requests"]),
+            int(client["successes"]),
+            int(client["failures"]),
+            float(client["total_latency_ms"]),
+            json.dumps(client["latencies_ms"], separators=(",", ":")),
+            int(client["hedged_requests"]),
+            flushed_at,
+        )
+        model_values = [
+            (
+                str(model["id"]),
+                int(model["successes"]),
+                int(model["failures"]),
+                int(model["throttles"]),
+                float(model["total_latency_ms"]),
+                int(model["input_tokens"]),
+                int(model["output_tokens"]),
+                int(model["adoptions"]),
+                int(model["hedge_participations"]),
+                int(model["hedge_wins"]),
+                int(model["discarded_responses"]),
+                json.dumps(model["latencies_ms"], separators=(",", ":")),
+                flushed_at,
+            )
+            for model in models
+        ]
+        with self.lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO proxy_metrics (
+                    id, client_requests, client_successes, client_failures,
+                    client_total_latency_ms, client_latencies_json, hedged_requests, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    client_requests = excluded.client_requests,
+                    client_successes = excluded.client_successes,
+                    client_failures = excluded.client_failures,
+                    client_total_latency_ms = excluded.client_total_latency_ms,
+                    client_latencies_json = excluded.client_latencies_json,
+                    hedged_requests = excluded.hedged_requests,
+                    updated_at = excluded.updated_at
+                """,
+                proxy_values,
+            )
+            connection.executemany(
+                """
+                INSERT INTO model_metrics (
+                    model_id, successes, failures, throttles, total_latency_ms,
+                    input_tokens, output_tokens, adoptions, hedge_participations,
+                    hedge_wins, discarded_responses, latencies_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(model_id) DO UPDATE SET
+                    successes = excluded.successes,
+                    failures = excluded.failures,
+                    throttles = excluded.throttles,
+                    total_latency_ms = excluded.total_latency_ms,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    adoptions = excluded.adoptions,
+                    hedge_participations = excluded.hedge_participations,
+                    hedge_wins = excluded.hedge_wins,
+                    discarded_responses = excluded.discarded_responses,
+                    latencies_json = excluded.latencies_json,
+                    updated_at = excluded.updated_at
+                """,
+                model_values,
+            )
+        self.last_flushed_at = flushed_at
 
 
 def read_pid() -> Optional[int]:
@@ -830,10 +1034,29 @@ class ModelState:
 
 
 class ModelPool:
-    def __init__(self, config: Dict[str, Any], unavailable: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        enabled = [copy.deepcopy(model) for model in config["models"] if model.get("enabled", True)]
-        self.states = [ModelState(model) for model in enabled]
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        unavailable: Optional[Dict[str, Dict[str, Any]]] = None,
+        persisted_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
+        self.states = [ModelState(copy.deepcopy(model)) for model in config["models"]]
         for state in self.states:
+            metrics = (persisted_metrics or {}).get(state.model_id, {})
+            for field_name in (
+                "successes",
+                "failures",
+                "throttles",
+                "input_tokens",
+                "output_tokens",
+                "adoptions",
+                "hedge_participations",
+                "hedge_wins",
+                "discarded_responses",
+            ):
+                setattr(state, field_name, int(metrics.get(field_name, 0)))
+            state.total_latency_ms = float(metrics.get("total_latency_ms", 0))
+            state.latencies_ms = deque(metrics.get("latencies_ms", []), maxlen=200)
             saved = (unavailable or {}).get(state.model_id)
             if saved:
                 state.unavailable = True
@@ -877,7 +1100,12 @@ class ModelPool:
                 for offset in range(count):
                     index = (self.cursor + offset) % count
                     state = self.states[index]
-                    if state.model_id in excluded or state.unavailable or state.cooldown_until > now:
+                    if (
+                        state.model_id in excluded
+                        or not state.config.get("enabled", True)
+                        or state.unavailable
+                        or state.cooldown_until > now
+                    ):
                         continue
                     if require_incremental_stream and not state.config.get("stream_compatible", True):
                         continue
@@ -953,6 +1181,40 @@ class ModelPool:
             state.cooldown_until = 0
             state.cooldown_reason = ""
 
+    def set_enabled(self, model_id: str, enabled: bool, clear_unavailable: bool = False) -> bool:
+        with self.lock:
+            for state in self.states:
+                if state.model_id != model_id:
+                    continue
+                state.config["enabled"] = enabled
+                if enabled and clear_unavailable:
+                    state.unavailable = False
+                    state.unavailable_reason = ""
+                    state.cooldown_until = 0
+                    state.cooldown_reason = ""
+                return True
+        return False
+
+    def persistent_snapshot(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            return [
+                {
+                    "id": state.model_id,
+                    "successes": state.successes,
+                    "failures": state.failures,
+                    "throttles": state.throttles,
+                    "total_latency_ms": state.total_latency_ms,
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                    "adoptions": state.adoptions,
+                    "hedge_participations": state.hedge_participations,
+                    "hedge_wins": state.hedge_wins,
+                    "discarded_responses": state.discarded_responses,
+                    "latencies_ms": list(state.latencies_ms),
+                }
+                for state in self.states
+            ]
+
     def snapshot(self) -> List[Dict[str, Any]]:
         now = time.monotonic()
         output = []
@@ -973,6 +1235,7 @@ class ModelPool:
                 output.append(
                     {
                         "id": state.model_id,
+                        "enabled": bool(state.config.get("enabled", True)),
                         "role": state.config.get("role", ""),
                         "routing_priority": state.config.get("routing_priority", 10),
                         "rpm": state.config.get("rpm", 600),
@@ -1119,12 +1382,24 @@ class AliyunProxy:
         client_key: str,
         upstream_key: str,
         unavailable_store: Optional[UnavailableStore] = None,
+        metrics_file: Optional[Path] = None,
+        config_file: Optional[Path] = None,
     ) -> None:
         self.config = config
+        self.config_file = config_file
         self.client_key = client_key
         self.upstream_key = upstream_key
+        self.log = logging.getLogger("aliyun-proxy")
+        self.metrics_lock = threading.Lock()
+        self.config_lock = threading.Lock()
         self.unavailable_store = unavailable_store or UnavailableStore(None)
-        self.pool = ModelPool(config, self.unavailable_store.snapshot())
+        self.metrics_store = MetricsStore(metrics_file)
+        persisted_client, persisted_models = self.metrics_store.load()
+        self.pool = ModelPool(
+            config,
+            self.unavailable_store.snapshot(),
+            persisted_models,
+        )
         self.hedging_config = config.get("hedging", {})
         self.hedging_enabled = bool(self.hedging_config.get("enabled", True))
         self.hedge_delay_seconds = float(
@@ -1134,16 +1409,31 @@ class AliyunProxy:
             int(self.hedging_config.get("max_concurrent_backups", 4))
         )
         self.started_at = time.time()
-        self.log = logging.getLogger("aliyun-proxy")
-        self.metrics_lock = threading.Lock()
-        self.client_requests = 0
-        self.client_successes = 0
-        self.client_failures = 0
-        self.client_total_latency_ms = 0.0
-        self.client_latencies_ms: Deque[float] = deque(maxlen=500)
-        self.hedged_requests = 0
+        self.client_requests = int(persisted_client.get("requests", 0))
+        self.client_successes = int(persisted_client.get("successes", 0))
+        self.client_failures = int(persisted_client.get("failures", 0))
+        self.client_total_latency_ms = float(persisted_client.get("total_latency_ms", 0))
+        self.client_latencies_ms: Deque[float] = deque(
+            persisted_client.get("latencies_ms", []),
+            maxlen=500,
+        )
+        self.hedged_requests = int(persisted_client.get("hedged_requests", 0))
         self.process_sample_at = 0.0
         self.process_sample = {"rss_mb": 0.0, "cpu_percent": 0.0}
+        self.metrics_flush_interval = float(
+            config.get("metrics_flush_interval_seconds", 5)
+        )
+        self.metrics_stop = threading.Event()
+        self.metrics_thread: Optional[threading.Thread] = None
+        self.close_lock = threading.Lock()
+        self.closed = False
+        if self.metrics_store.enabled:
+            self.metrics_thread = threading.Thread(
+                target=self._metrics_loop,
+                name="aliyun-proxy-metrics",
+                daemon=True,
+            )
+            self.metrics_thread.start()
 
     @property
     def alias(self) -> str:
@@ -1152,6 +1442,71 @@ class AliyunProxy:
     def authorized(self, authorization: str) -> bool:
         expected = "Bearer " + self.client_key
         return hmac.compare_digest(authorization.strip(), expected)
+
+    def _persistent_client_snapshot(self) -> Dict[str, Any]:
+        with self.metrics_lock:
+            return {
+                "requests": self.client_requests,
+                "successes": self.client_successes,
+                "failures": self.client_failures,
+                "total_latency_ms": self.client_total_latency_ms,
+                "latencies_ms": list(self.client_latencies_ms),
+                "hedged_requests": self.hedged_requests,
+            }
+
+    def flush_metrics(self) -> None:
+        if not self.metrics_store.enabled:
+            return
+        try:
+            self.metrics_store.flush(
+                self._persistent_client_snapshot(),
+                self.pool.persistent_snapshot(),
+            )
+        except (OSError, sqlite3.Error, ValueError, TypeError) as error:
+            self.log.exception("metrics_flush_failed error=%s", error)
+
+    def _metrics_loop(self) -> None:
+        while not self.metrics_stop.wait(self.metrics_flush_interval):
+            self.flush_metrics()
+
+    def close(self) -> None:
+        with self.close_lock:
+            if self.closed:
+                return
+            self.closed = True
+        self.metrics_stop.set()
+        if self.metrics_thread is not None and self.metrics_thread is not threading.current_thread():
+            self.metrics_thread.join(timeout=self.metrics_flush_interval + 1)
+        self.flush_metrics()
+
+    def set_model_enabled(self, model_id: str, enabled: bool) -> None:
+        with self.config_lock:
+            models = self.config.get("models", [])
+            model = next(
+                (candidate for candidate in models if str(candidate.get("id")) == model_id),
+                None,
+            )
+            if model is None:
+                raise KeyError(model_id)
+            if not enabled:
+                enabled_count = sum(
+                    1 for candidate in models if candidate.get("enabled", True)
+                )
+                if model.get("enabled", True) and enabled_count <= 1:
+                    raise ValueError("At least one model must remain enabled")
+            model["enabled"] = enabled
+            if self.config_file is not None:
+                temporary = self.config_file.with_suffix(".tmp")
+                temporary.write_text(
+                    json.dumps(self.config, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(self.config_file)
+        if enabled:
+            self.unavailable_store.clear(model_id)
+        if not self.pool.set_enabled(model_id, enabled, clear_unavailable=enabled):
+            raise KeyError(model_id)
+        self.log.info("model=%s manually_enabled=%s", model_id, str(enabled).lower())
 
     @staticmethod
     def _message_text(content: Any) -> str:
@@ -1666,6 +2021,11 @@ class AliyunProxy:
             "base_url": "http://%s:%s/v1" % (self.config["host"], self.config["port"]),
             "model_alias": self.alias,
             "upstream_base_url": self.config["upstream_base_url"],
+            "metrics_persistence": {
+                "enabled": self.metrics_store.enabled,
+                "flush_interval_seconds": self.metrics_flush_interval,
+                "last_flushed_at": self.metrics_store.last_flushed_at,
+            },
             "hedging": {
                 "enabled": self.hedging_enabled,
                 "delay_seconds": self.hedge_delay_seconds,
@@ -1712,6 +2072,10 @@ class ProxyHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: Tuple[str, int], proxy: AliyunProxy) -> None:
         self.proxy = proxy
         super().__init__(address, ProxyHandler)
+
+    def server_close(self) -> None:
+        self.proxy.close()
+        super().server_close()
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -1809,6 +2173,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
         )
         return False
 
+    def _require_dashboard_control(self) -> bool:
+        if self.headers.get("X-Proxy-Dashboard", "") != "1":
+            self._send_json(
+                403,
+                {"error": {"code": "dashboard_control_denied", "message": "Dashboard control header is required."}},
+            )
+            return False
+        origin = self.headers.get("Origin", "").rstrip("/")
+        allowed_origins = {
+            "http://127.0.0.1:%s" % self.proxy.config["port"],
+            "http://localhost:%s" % self.proxy.config["port"],
+        }
+        fetch_site = self.headers.get("Sec-Fetch-Site", "")
+        if (origin and origin not in allowed_origins) or fetch_site not in ("", "none", "same-origin"):
+            self._send_json(
+                403,
+                {"error": {"code": "dashboard_control_denied", "message": "Dashboard control is same-origin only."}},
+            )
+            return False
+        return True
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self.send_header("Content-Length", "0")
@@ -1853,6 +2238,42 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/v1/proxy/models/enabled":
+            if not self._require_dashboard_control():
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 64 * 1024:
+                self._send_json(400, {"error": {"code": "invalid_request", "message": "Invalid request size."}})
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"error": {"code": "invalid_json", "message": "Request body must be JSON."}})
+                return
+            model_id = str(payload.get("model", "")).strip() if isinstance(payload, dict) else ""
+            enabled = payload.get("enabled") if isinstance(payload, dict) else None
+            if not model_id or not isinstance(enabled, bool):
+                self._send_json(
+                    400,
+                    {"error": {"code": "invalid_request", "message": "model and boolean enabled are required."}},
+                )
+                return
+            try:
+                self.proxy.set_model_enabled(model_id, enabled)
+            except KeyError:
+                self._send_json(404, {"error": {"code": "model_not_found", "message": "Model not found."}})
+                return
+            except ValueError as error:
+                self._send_json(409, {"error": {"code": "last_enabled_model", "message": str(error)}})
+                return
+            self._send_json(
+                200,
+                {"model": model_id, "enabled": enabled, "dashboard": self.proxy.status()},
+            )
+            return
         if path != "/v1/chat/completions":
             self._send_json(404, {"error": {"code": "not_found", "message": "Endpoint not found."}})
             return
@@ -1946,8 +2367,17 @@ def build_server(
     client_key: str,
     upstream_key: str,
     unavailable_file: Optional[Path] = UNAVAILABLE_FILE,
+    metrics_file: Optional[Path] = METRICS_FILE,
+    config_file: Optional[Path] = CONFIG_FILE,
 ) -> ProxyHTTPServer:
-    proxy = AliyunProxy(config, client_key, upstream_key, UnavailableStore(unavailable_file))
+    proxy = AliyunProxy(
+        config,
+        client_key,
+        upstream_key,
+        UnavailableStore(unavailable_file),
+        metrics_file,
+        config_file,
+    )
     return ProxyHTTPServer((str(config["host"]), int(config["port"])), proxy)
 
 

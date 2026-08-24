@@ -15,6 +15,8 @@
 - 除 Qwen-MT 适配器外严格透明转发，只替换上游 `model`
 - Qwen-MT 识别 Read Frog 目标语言，支持完整型号 92 种、Lite 31 种语言能力检查
 - 本地 API Key 与阿里云 API Key 持久保存，权限为 `0600`
+- 运行统计每 5 秒批量写入 SQLite，重启代理后继续累计
+- 统计页支持人工禁用、启用和重试不可用模型，状态写回本地配置
 - 运行统计不保存或展示网页正文、提示词和任何 API Key
 - 停止代理时 Python 进程退出，不保留本地模型或额外常驻进程
 
@@ -46,7 +48,7 @@ python3 aliyun_proxy.py set-upstream-key
 DASHSCOPE_API_KEY='你的 Key' python3 aliyun_proxy.py set-upstream-key --from-env
 ```
 
-本地客户端 Key 保存到 `.aliyun-proxy/client.key`。这两个文件、配置覆盖、不可用模型状态、PID 和日志都位于 `.aliyun-proxy/`，已被 Git 忽略，不会提交到仓库。
+本地客户端 Key 保存到 `.aliyun-proxy/client.key`。这两个文件、配置覆盖、不可用模型状态、SQLite 指标库、PID 和日志都位于 `.aliyun-proxy/`，已被 Git 忽略，不会提交到仓库。
 
 ## 启动和管理
 
@@ -73,7 +75,11 @@ python3 aliyun_proxy.py restart
 http://127.0.0.1:39281/v1
 ```
 
-页面每 2 秒在上一请求完成后继续刷新，不会堆积轮询请求。它显示模型采纳率、竞速参与与胜出、丢弃响应、请求延迟和资源用量。页面数据属于本次 Python 进程，重启代理后统计清零。`GET /v1/proxy/dashboard-data` 是页面使用的无敏感信息接口；原始状态接口 `GET /v1/proxy/status` 仍要求本地 Bearer Key。
+页面每 2 秒在上一请求完成后继续刷新，不会堆积轮询请求。它显示模型采纳率、竞速参与与胜出、丢弃响应、请求延迟和资源用量，并提供模型的禁用、启用和“重试启用”按钮。禁用只停止后续调度，不删除模型或历史统计；重新启用会解除该模型的持久不可用状态。
+
+累计指标保存在 `.aliyun-proxy/metrics.sqlite3`，默认每 5 秒批量提交一次，正常停止服务时还会执行最后一次提交。因此异常退出最多损失约 5 秒的新增指标，重启不会清空已落库的数据。数据库只保存计数、Token 汇总和最近延迟样本，不保存请求正文、提示词或任何 API Key。刷新间隔可通过 `.aliyun-proxy/proxy.json` 的 `metrics_flush_interval_seconds` 调整。
+
+`GET /v1/proxy/dashboard-data` 是页面使用的无敏感信息接口；原始状态接口 `GET /v1/proxy/status` 仍要求本地 Bearer Key。模型控制接口只接受同源统计页面带有专用标记的请求，且不允许禁用最后一个可用模型。
 
 ## Read Frog 设置
 

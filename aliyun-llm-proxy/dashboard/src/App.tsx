@@ -3,6 +3,7 @@ import {
   Alert,
   Badge,
   Box,
+  Button,
   Container,
   Group,
   Loader,
@@ -40,6 +41,7 @@ type ClientMetrics = {
 
 export type ModelMetrics = {
   id: string
+  enabled: boolean
   role: string
   routing_priority: number
   rpm: number
@@ -75,6 +77,11 @@ type DashboardData = {
   uptime_seconds: number
   base_url: string
   model_alias: string
+  metrics_persistence: {
+    enabled: boolean
+    flush_interval_seconds: number
+    last_flushed_at: number
+  }
   client: ClientMetrics
   process: { rss_mb: number; cpu_percent: number }
   totals: {
@@ -123,6 +130,7 @@ function formatUptime(seconds: number) {
 }
 
 function modelState(model: ModelMetrics) {
+  if (!model.enabled) return { label: '已禁用', color: 'gray' }
   if (model.unavailable) return { label: '不可用', color: 'red' }
   if (model.cooldown_seconds > 0) return { label: `冷却 ${Math.ceil(model.cooldown_seconds)}s`, color: 'orange' }
   if (model.in_flight > 0) return { label: `处理中 ${model.in_flight}`, color: 'blue' }
@@ -146,10 +154,16 @@ function MetricCard({ title, value, detail, icon: Icon, color }: MetricCardProps
   )
 }
 
-function ModelsTable({ models }: { models: ModelMetrics[] }) {
+type ModelsTableProps = {
+  models: ModelMetrics[]
+  pendingModel: string
+  onToggle: (modelId: string, enabled: boolean) => void
+}
+
+function ModelsTable({ models, pendingModel, onToggle }: ModelsTableProps) {
   return (
     <ScrollArea>
-      <Table className="models-table" verticalSpacing="sm" horizontalSpacing="md" miw={1450}>
+      <Table className="models-table" verticalSpacing="sm" horizontalSpacing="md" miw={1550}>
         <Table.Thead>
           <Table.Tr>
             <Table.Th>模型</Table.Th>
@@ -163,12 +177,19 @@ function ModelsTable({ models }: { models: ModelMetrics[] }) {
             <Table.Th ta="right">平均 / P95 / 最近</Table.Th>
             <Table.Th ta="right">近 1 分钟</Table.Th>
             <Table.Th ta="right">输入 / 输出 Token</Table.Th>
+            <Table.Th ta="right" className="models-action-cell">操作</Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
           {models.map((model) => {
             const state = modelState(model)
             const reason = model.unavailable_reason || model.cooldown_reason
+            const nextEnabled = !model.enabled || model.unavailable
+            const actionLabel = model.unavailable
+              ? '重试启用'
+              : model.enabled
+                ? '禁用'
+                : '启用'
             return (
               <Table.Tr key={model.id}>
                 <Table.Td>
@@ -202,6 +223,19 @@ function ModelsTable({ models }: { models: ModelMetrics[] }) {
                 </Table.Td>
                 <Table.Td ta="right">{model.requests_last_minute}</Table.Td>
                 <Table.Td ta="right">{formatInteger(model.input_tokens)} / {formatInteger(model.output_tokens)}</Table.Td>
+                <Table.Td ta="right" className="models-action-cell">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="light"
+                    color={nextEnabled ? 'teal' : 'red'}
+                    loading={pendingModel === model.id}
+                    disabled={Boolean(pendingModel) && pendingModel !== model.id}
+                    onClick={() => onToggle(model.id, nextEnabled)}
+                  >
+                    {actionLabel}
+                  </Button>
+                </Table.Td>
               </Table.Tr>
             )
           })}
@@ -215,6 +249,8 @@ function App() {
   useDocumentTitle('阿里云模型代理 · 运行统计')
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState('')
+  const [actionError, setActionError] = useState('')
+  const [pendingModel, setPendingModel] = useState('')
 
   useEffect(() => {
     let active = true
@@ -255,6 +291,33 @@ function App() {
     ? (data.client.successes / data.client.requests) * 100
     : 0
 
+  const toggleModel = async (modelId: string, enabled: boolean) => {
+    setPendingModel(modelId)
+    try {
+      const response = await fetch('/v1/proxy/models/enabled', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Proxy-Dashboard': '1',
+        },
+        body: JSON.stringify({ model: modelId, enabled }),
+      })
+      const payload = await response.json() as {
+        dashboard?: DashboardData
+        error?: { message?: string }
+      }
+      if (!response.ok || !payload.dashboard) {
+        throw new Error(payload.error?.message || `HTTP ${response.status}`)
+      }
+      setData(payload.dashboard)
+      setActionError('')
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : '模型状态更新失败')
+    } finally {
+      setPendingModel('')
+    }
+  }
+
   return (
     <Box className="app-shell">
       <Container size="xl" py={{ base: 24, sm: 42 }}>
@@ -267,7 +330,9 @@ function App() {
                 </ThemeIcon>
                 <Title order={1}>模型代理运行统计</Title>
               </Group>
-              <Text c="dimmed">阿里云百炼多模型路由 · 数据每 2 秒刷新 · 仅统计本次启动</Text>
+              <Text c="dimmed">
+                阿里云百炼多模型路由 · 数据每 2 秒刷新 · 累计统计每 {data?.metrics_persistence.flush_interval_seconds ?? 5} 秒写入 SQLite
+              </Text>
             </Stack>
             <Group gap="xs">
               {data ? <Badge color="teal" variant="dot">代理运行中</Badge> : <Loader size="xs" />}
@@ -278,6 +343,12 @@ function App() {
           {error && (
             <Alert icon={<IconAlertCircle size={18} />} color="red" title="暂时无法读取统计数据">
               {error}；页面会自动重试。
+            </Alert>
+          )}
+
+          {actionError && (
+            <Alert icon={<IconAlertCircle size={18} />} color="red" title="模型状态更新失败" withCloseButton onClose={() => setActionError('')}>
+              {actionError}
             </Alert>
           )}
 
@@ -342,7 +413,11 @@ function App() {
                 </Box>
                 <Badge variant="light">{data?.models.length ?? 0} 个模型</Badge>
               </Group>
-              <ModelsTable models={data?.models ?? []} />
+              <ModelsTable
+                models={data?.models ?? []}
+                pendingModel={pendingModel}
+                onToggle={toggleModel}
+              />
             </Stack>
           </Paper>
 

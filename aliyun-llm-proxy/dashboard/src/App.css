@@ -46,6 +46,22 @@ body {
   background: rgba(34, 139, 230, 0.035);
 }
 
+.models-table .models-action-cell {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: #fff;
+  box-shadow: -12px 0 18px -18px rgba(27, 38, 59, 0.55);
+}
+
+.models-table thead .models-action-cell {
+  z-index: 2;
+}
+
+.models-table tbody tr:hover .models-action-cell {
+  background: #fbfdff;
+}
+
 .footer {
   border-top: 1px solid #e9ecef;
   padding-top: 4px;

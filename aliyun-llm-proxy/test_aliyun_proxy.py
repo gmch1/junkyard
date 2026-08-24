@@ -76,9 +76,14 @@ class FakeUpstream:
 
 
 class RunningProxy:
-    def __init__(self, config):
+    def __init__(self, config, metrics_file=None, config_file=None):
         self.server = aliyun_proxy.build_server(
-            config, "local-key", "upstream-key", unavailable_file=None
+            config,
+            "local-key",
+            "upstream-key",
+            unavailable_file=None,
+            metrics_file=metrics_file,
+            config_file=config_file,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -99,6 +104,19 @@ def proxy_post(proxy, body):
         data=json.dumps(body).encode(),
         method="POST",
         headers={"Authorization": "Bearer local-key", "Content-Type": "application/json"},
+    )
+    return urllib.request.urlopen(request, timeout=5)
+
+
+def dashboard_control_post(proxy, model, enabled, include_control_header=True):
+    headers = {"Content-Type": "application/json"}
+    if include_control_header:
+        headers["X-Proxy-Dashboard"] = "1"
+    request = urllib.request.Request(
+        proxy.url + "/v1/proxy/models/enabled",
+        data=json.dumps({"model": model, "enabled": enabled}).encode(),
+        method="POST",
+        headers=headers,
     )
     return urllib.request.urlopen(request, timeout=5)
 
@@ -820,6 +838,132 @@ class ProxyTests(unittest.TestCase):
                     proxy.url + "/dashboard-assets/%2e%2e/README.md", timeout=5
                 )
             self.assertEqual(raised.exception.code, 404)
+        finally:
+            proxy.close()
+            upstream.close()
+
+    def test_metrics_are_persisted_in_sqlite_across_restarts(self):
+        def respond(body):
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 3},
+            }, {}
+
+        upstream = FakeUpstream(respond)
+        with tempfile.TemporaryDirectory() as directory:
+            metrics_file = Path(directory) / "metrics.sqlite3"
+            config = make_config(upstream.url)
+            config["metrics_flush_interval_seconds"] = 5
+            first_proxy = RunningProxy(config, metrics_file=metrics_file)
+            try:
+                with proxy_post(
+                    first_proxy,
+                    {"model": "anything", "messages": [{"role": "user", "content": "hello"}]},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                first_proxy.close()
+
+            self.assertTrue(metrics_file.is_file())
+            second_proxy = RunningProxy(config, metrics_file=metrics_file)
+            try:
+                with urllib.request.urlopen(
+                    second_proxy.url + "/v1/proxy/dashboard-data", timeout=5
+                ) as response:
+                    metrics = json.load(response)
+
+                self.assertTrue(metrics["metrics_persistence"]["enabled"])
+                self.assertEqual(metrics["metrics_persistence"]["flush_interval_seconds"], 5)
+                self.assertGreater(metrics["metrics_persistence"]["last_flushed_at"], 0)
+                self.assertEqual(metrics["client"]["requests"], 1)
+                self.assertEqual(metrics["client"]["successes"], 1)
+                self.assertEqual(metrics["totals"]["model_successes"], 1)
+                self.assertEqual(metrics["totals"]["adoptions"], 1)
+                self.assertEqual(metrics["totals"]["input_tokens"], 11)
+                self.assertEqual(metrics["totals"]["output_tokens"], 3)
+            finally:
+                second_proxy.close()
+        upstream.close()
+
+    def test_dashboard_can_persistently_disable_and_reenable_models(self):
+        def respond(body):
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }, {}
+
+        upstream = FakeUpstream(respond)
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "proxy.json"
+            config = make_config(upstream.url)
+            config_file.write_text(json.dumps(config), encoding="utf-8")
+            proxy = RunningProxy(config, config_file=config_file)
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    dashboard_control_post(
+                        proxy,
+                        "model-a",
+                        False,
+                        include_control_header=False,
+                    )
+                self.assertEqual(denied.exception.code, 403)
+
+                with dashboard_control_post(proxy, "model-a", False) as response:
+                    dashboard = json.load(response)["dashboard"]
+                model_a = next(model for model in dashboard["models"] if model["id"] == "model-a")
+                self.assertFalse(model_a["enabled"])
+                self.assertEqual(len(dashboard["models"]), 3)
+
+                with proxy_post(
+                    proxy,
+                    {"model": "ignored", "messages": [{"role": "user", "content": "hello"}]},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                self.assertEqual(upstream.calls, ["model-b"])
+            finally:
+                proxy.close()
+
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+            saved_model_a = next(model for model in saved["models"] if model["id"] == "model-a")
+            self.assertFalse(saved_model_a["enabled"])
+
+            restarted = RunningProxy(saved, config_file=config_file)
+            try:
+                with urllib.request.urlopen(
+                    restarted.url + "/v1/proxy/dashboard-data", timeout=5
+                ) as response:
+                    restarted_dashboard = json.load(response)
+                restarted_model_a = next(
+                    model for model in restarted_dashboard["models"] if model["id"] == "model-a"
+                )
+                self.assertFalse(restarted_model_a["enabled"])
+
+                with dashboard_control_post(restarted, "model-a", True) as response:
+                    enabled_dashboard = json.load(response)["dashboard"]
+                enabled_model_a = next(
+                    model for model in enabled_dashboard["models"] if model["id"] == "model-a"
+                )
+                self.assertTrue(enabled_model_a["enabled"])
+            finally:
+                restarted.close()
+
+            saved_again = json.loads(config_file.read_text(encoding="utf-8"))
+            saved_model_a = next(model for model in saved_again["models"] if model["id"] == "model-a")
+            self.assertTrue(saved_model_a["enabled"])
+        upstream.close()
+
+    def test_dashboard_refuses_to_disable_the_last_enabled_model(self):
+        upstream = FakeUpstream(lambda body: (200, {"model": body["model"]}, {}))
+        config = make_config(upstream.url)
+        config["models"] = [config["models"][0]]
+        proxy = RunningProxy(config)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                dashboard_control_post(proxy, "model-a", False)
+            self.assertEqual(raised.exception.code, 409)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+            self.assertEqual(payload["error"]["code"], "last_enabled_model")
         finally:
             proxy.close()
             upstream.close()
