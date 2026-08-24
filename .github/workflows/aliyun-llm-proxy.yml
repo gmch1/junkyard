@@ -1,0 +1,58 @@
+name: Aliyun LLM Proxy
+
+on:
+  pull_request:
+    paths:
+      - "aliyun-llm-proxy/**"
+      - ".github/workflows/aliyun-llm-proxy.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "aliyun-llm-proxy/**"
+      - ".github/workflows/aliyun-llm-proxy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build dashboard and test proxy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aliyun-llm-proxy
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dashboard dependencies
+        run: pnpm --dir dashboard install --frozen-lockfile
+
+      - name: Lint and build dashboard
+        run: |
+          pnpm --dir dashboard run lint
+          pnpm --dir dashboard run build
+
+      - name: Test proxy
+        run: |
+          python3 -m py_compile aliyun_proxy.py test_aliyun_proxy.py
+          python3 -m unittest -v test_aliyun_proxy.py

@@ -6,6 +6,7 @@
 
 | 项目 | 平台 | 说明 | CI/CD |
 | --- | --- | --- | --- |
+| [`aliyun-llm-proxy`](./aliyun-llm-proxy/) | macOS / Linux | OpenAI 兼容的阿里云百炼多模型代理，包含自动限流降级与 Mantine + Recharts 本地统计页 | 前端构建、Lint 与 Python 测试 |
 | [`macos-router-status-widget`](./macos-router-status-widget/) | macOS + OpenWrt | 展示 WAN、CPU、内存、温度及局域网设备实时流量，并提供受限重启操作的桌面小组件 | macOS构建产物与标签发布 |
 
 ## 新增项目约定

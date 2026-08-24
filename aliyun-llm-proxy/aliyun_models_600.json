@@ -1,0 +1,140 @@
+{
+  "source": "https://help.aliyun.com/zh/model-studio/rate-limit",
+  "checked_at": "2026-08-24",
+  "scope": "中国内地文本生成与开源文本生成表",
+  "selection_rule": "RPM 恰好为 600、支持纯文本 Chat Completions，并排除 Thinking、Coder、VL、OCR、Audio、ASR、Embedding、Rerank、文档挖掘和对话分析模型",
+  "recommended": [
+    {
+      "id": "qwen3.6-flash-2026-04-16",
+      "rpm": 600,
+      "tpm": 1000000,
+      "role": "快速翻译主力",
+      "transparent_request_body": true
+    },
+    {
+      "id": "qwen3.5-flash-2026-02-23",
+      "rpm": 600,
+      "tpm": 1000000,
+      "role": "快速翻译主力",
+      "transparent_request_body": true
+    },
+    {
+      "id": "qwen3.7-plus-2026-05-26",
+      "rpm": 600,
+      "tpm": 1000000,
+      "role": "质量备用",
+      "transparent_request_body": true
+    },
+    {
+      "id": "qwen3.6-plus-2026-04-02",
+      "rpm": 600,
+      "tpm": 1000000,
+      "role": "质量备用",
+      "transparent_request_body": true
+    },
+    {
+      "id": "qwen3-30b-a3b-instruct-2507",
+      "rpm": 600,
+      "tpm": 1000000,
+      "role": "非思考 Instruct 备用",
+      "transparent_request_body": true
+    }
+  ],
+  "compatible_optional": [
+    "qwen3.7-max-2026-06-08",
+    "qwen3.7-max-2026-05-20",
+    "qwen3.6-max-preview",
+    "qwen3-max-2026-01-23",
+    "qwen3-max-preview",
+    "qwen3.5-plus-2026-04-20",
+    "qwen3.5-plus-2026-02-15",
+    "qwen3.6-35b-a3b",
+    "qwen3.6-27b",
+    "qwen3.5-397b-a17b",
+    "qwen3.5-122b-a10b",
+    "qwen3.5-27b",
+    "qwen3.5-35b-a3b",
+    "qwen3-next-80b-a3b-instruct",
+    "qwen3-235b-a22b-instruct-2507",
+    "qwen3-235b-a22b",
+    "qwen3-30b-a3b",
+    "qwen3-14b",
+    "qwen3-8b"
+  ],
+  "excluded_600": {
+    "reasoning_models": [
+      "qwq-plus",
+      "qwen3-next-80b-a3b-thinking",
+      "qwen3-235b-a22b-thinking-2507",
+      "qwen3-30b-a3b-thinking-2507"
+    ],
+    "wrong_capability_examples": [
+      "qwen3-coder-plus-2025-09-23",
+      "qwen3-coder-flash",
+      "qwen3-vl-flash-2025-10-15",
+      "qwen-vl-ocr",
+      "qwen-doc-turbo",
+      "tongyi-xiaomi-analysis-flash",
+      "tongyi-xiaomi-analysis-pro",
+      "qwen-audio-3.0-asr-flash",
+      "qwen3-vl-rerank"
+    ]
+  },
+  "dedicated_translation_not_600": [
+    {
+      "id": "qwen-mt-plus",
+      "rpm": 60,
+      "proxy_min_interval_seconds": 30,
+      "enabled_by_proxy": true,
+      "request_adapter": "qwen-mt 专用格式，是透明请求体规则的唯一例外"
+    },
+    {
+      "id": "qwen-mt-flash",
+      "rpm": 60,
+      "proxy_min_interval_seconds": 30,
+      "enabled_by_proxy": true,
+      "request_adapter": "qwen-mt 专用格式，是透明请求体规则的唯一例外"
+    },
+    {
+      "id": "qwen-mt-lite",
+      "rpm": 60,
+      "proxy_min_interval_seconds": 30,
+      "enabled_by_proxy": true,
+      "request_adapter": "qwen-mt 专用格式，是透明请求体规则的唯一例外"
+    },
+    {
+      "id": "qwen-mt-turbo",
+      "rpm": 60,
+      "proxy_min_interval_seconds": 30,
+      "enabled_by_proxy": true,
+      "request_adapter": "qwen-mt 专用格式，是透明请求体规则的唯一例外"
+    }
+  ],
+  "general_text_60": {
+    "enabled": [
+      "qwen-flash-2025-07-28",
+      "qwen-plus-2025-09-11",
+      "qwen-plus-2025-07-28"
+    ],
+    "optional_higher_cost_or_older": [
+      "qwen3.7-max-preview",
+      "qwen3.7-max-2026-05-17",
+      "qwen3-max-2025-09-23",
+      "qwen-plus-2025-07-14",
+      "qwen-plus-2025-04-28",
+      "qwen-plus-2025-01-25",
+      "qwen-plus-2025-01-12",
+      "qwen-plus-2024-12-20"
+    ],
+    "proxy_min_interval_seconds": 30,
+    "routing_priority": "高于 600 RPM 池"
+  },
+  "quota_probe": {
+    "id": "deepseek-v4-flash",
+    "rpm": 15000,
+    "tpm": 1200000,
+    "observed_http_status": 403,
+    "observed_error_code": "AllocationQuota.FreeTierOnly",
+    "persistently_disabled": true
+  }
+}

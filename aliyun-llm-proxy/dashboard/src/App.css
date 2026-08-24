@@ -1,0 +1,75 @@
+:root {
+  --chart-grid: #e9ecef;
+  --chart-label: #6b7280;
+  --chart-hover: rgba(34, 139, 230, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(34, 139, 230, 0.09), transparent 30rem),
+    radial-gradient(circle at 90% 10%, rgba(132, 94, 247, 0.08), transparent 28rem),
+    #f8f9fa;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.metric-card {
+  min-height: 145px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px rgba(27, 38, 59, 0.08);
+}
+
+.metric-value {
+  color: #172033;
+  font-size: clamp(1.35rem, 2vw, 1.8rem);
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+}
+
+.empty-chart {
+  display: grid;
+  height: 280px;
+  color: #adb5bd;
+  place-items: center;
+}
+
+.models-table thead th {
+  color: #6b7280;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.models-table tbody tr:hover {
+  background: rgba(34, 139, 230, 0.035);
+}
+
+.footer {
+  border-top: 1px solid #e9ecef;
+  padding-top: 4px;
+}
+
+@media (max-width: 48em) {
+  .metric-card {
+    min-height: 132px;
+  }
+
+  .recharts-yAxis .recharts-cartesian-axis-tick-value {
+    font-size: 10px;
+  }
+}

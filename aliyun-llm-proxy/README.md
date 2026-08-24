@@ -1,0 +1,159 @@
+# 阿里云多模型本地代理
+
+一个监听 `127.0.0.1:39281` 的 OpenAI Chat Completions 兼容代理。它最初用于 Read Frog 网页翻译，也可以被其他兼容 OpenAI 接口的本地客户端使用。
+
+代理会在多个阿里云百炼模型之间轮询分配请求。模型触发限流、暂时故障或额度耗尽时，会在响应开始前自动切换到下一模型；内置的 Mantine + Recharts 页面用于查看请求量、模型分配、延迟、Token、限流、冷却状态以及 Python 进程内存。
+
+## 功能
+
+- OpenAI 兼容接口：`POST /v1/chat/completions`、`GET /v1/models`
+- 多模型轮询，优先使用满足 30 秒间隔的低频模型，再使用 600 RPM 模型池
+- 识别 429、部分 4xx 和 5xx，并按模型独立冷却或降级
+- 额度永久耗尽的模型写入本地状态，后续启动自动跳过
+- 除 Qwen-MT 适配器外严格透明转发，只替换上游 `model`
+- Qwen-MT 识别 Read Frog 目标语言，支持完整型号 92 种、Lite 31 种语言能力检查
+- 本地 API Key 与阿里云 API Key 持久保存，权限为 `0600`
+- 运行统计不保存或展示网页正文、提示词和任何 API Key
+- 停止代理时 Python 进程退出，不保留本地模型或额外常驻进程
+
+## 要求
+
+- Python 3.9 或更高版本；代理运行时只使用标准库
+- Node.js 22 或更高版本与 pnpm 11；仅构建统计页面时需要
+- 已开通阿里云百炼并拥有 DashScope API Key
+
+## 安装
+
+```bash
+git clone https://github.com/gmch1/junkyard.git
+cd junkyard/aliyun-llm-proxy
+pnpm --dir dashboard install --frozen-lockfile
+pnpm --dir dashboard run build
+python3 aliyun_proxy.py set-upstream-key
+```
+
+最后一条命令会隐藏输入内容。阿里云 Key 保存到：
+
+```text
+.aliyun-proxy/dashscope.key
+```
+
+也可以从环境变量一次性导入：
+
+```bash
+DASHSCOPE_API_KEY='你的 Key' python3 aliyun_proxy.py set-upstream-key --from-env
+```
+
+本地客户端 Key 保存到 `.aliyun-proxy/client.key`。这两个文件、配置覆盖、不可用模型状态、PID 和日志都位于 `.aliyun-proxy/`，已被 Git 忽略，不会提交到仓库。
+
+## 启动和管理
+
+```bash
+python3 aliyun_proxy.py start
+python3 aliyun_proxy.py status
+python3 aliyun_proxy.py logs
+python3 aliyun_proxy.py stop
+```
+
+其他命令：
+
+```bash
+python3 aliyun_proxy.py key
+python3 aliyun_proxy.py config
+python3 aliyun_proxy.py unavailable
+python3 aliyun_proxy.py reset-unavailable deepseek-v4-flash
+python3 aliyun_proxy.py restart
+```
+
+统计页面：
+
+```text
+http://127.0.0.1:39281/v1
+```
+
+页面每 2 秒在上一请求完成后继续刷新，不会堆积轮询请求。页面显示的数据属于本次 Python 进程，重启代理后统计清零。`GET /v1/proxy/dashboard-data` 是页面使用的无敏感信息接口；原始状态接口 `GET /v1/proxy/status` 仍要求本地 Bearer Key。
+
+## Read Frog 设置
+
+在 `Custom Chat Complete` Provider 中填写：
+
+- Base URL：`http://127.0.0.1:39281/v1`
+- API Key：`python3 aliyun_proxy.py key` 的输出
+- Custom model：可以填写任意字符串，建议用 `aliyun-translate-auto`
+- Temperature：`0`
+
+建议从以下翻译队列参数开始：
+
+- 最大突发请求数：`10`
+- 每秒请求数：`10`
+- 最大字符数：`1000`
+- 最大段落数：`4`
+- 预翻译距离：`1000`
+- 可见比例：`0.1`
+
+确认没有频繁限流后，再逐步提高到每秒 `15` 或 `20`。不建议直接使用 30 RPS，因为百炼还可能检查瞬时增速并返回 `Throttling.BurstRate`。
+
+旧名称 `translategemma-4b-it` 作为兼容别名保留。代理不根据调用方填写的模型名选择上游，而是使用自己的模型池。
+
+## 请求透明性与 Qwen-MT 例外
+
+除 Qwen-MT 外，代理只把调用方的 `model` 替换为路由选中的阿里云模型；`messages`、提示词、`temperature`、`max_tokens`、`stream` 和其他参数均不新增、不删除、不合并、不改写，因此不会与 Read Frog 的自定义提示词冲突。
+
+Qwen-MT 是唯一例外。适配器会从系统提示词和最后一条 User Message 识别目标语言，把 Read Frog 的 `Translate to 目标语言: 正文` 包装剥离为正文，再生成 Qwen-MT 所需的单条 User Message 和 `translation_options`。调用方目标语言优先，不叠加另一套翻译提示词。
+
+语言表按 Read Frog 使用的 `@read-frog/definitions@0.4.4` 与阿里云 [Qwen-MT 支持语言表](https://help.aliyun.com/zh/model-studio/machine-translation/) 映射，例如：
+
+- `Simplified Mandarin Chinese → zh`
+- `Traditional Mandarin Chinese → zh_tw`
+- `Standard Arabic → ar`
+
+某个 MT 型号不支持目标语言时会在本地跳过；所有 MT 型号都不支持，或阿里云返回“暂时不支持当前设置的语种”，则自动交给通用模型。
+
+## 默认模型池
+
+默认包含 Qwen Flash、Plus、Instruct 以及 Qwen-MT Flash/Lite/Plus/Turbo。完整配置位于首次启动生成的 `.aliyun-proxy/proxy.json`，筛选数据见 [`aliyun_models_600.json`](./aliyun_models_600.json)。
+
+官方将部分模型标为 60 RPM，但实际还可能存在隐藏并发、瞬时增速或容量限制。因此这些模型额外设置 `min_interval_seconds: 30`：同一型号 30 秒内最多被选中一次。若其中一个返回 429，同次请求会跳过其他低频型号并直接使用高频池。
+
+`deepseek-v4-flash` 被用作额度探针。账号返回 `403 AllocationQuota.FreeTierOnly` 后，代理将其写入 `.aliyun-proxy/unavailable_models.json` 并在后续启动中跳过。额度恢复后可用 `reset-unavailable` 清除状态。
+
+## 自动降级
+
+规则依据百炼[错误码文档](https://help.aliyun.com/zh/model-studio/error-code/)：
+
+| HTTP / 错误码 | 行为 |
+| --- | --- |
+| `429 Throttling.*` | 当前模型冷却，切换下一模型 |
+| `500/502/503/504` | 当前模型短暂冷却，切换下一模型 |
+| `403/404 ModelNotFound/Model.AccessDenied` | 暂停当前模型，切换下一模型 |
+| `403 AllocationQuota.FreeTierOnly` | 持久禁用当前模型，切换下一模型 |
+| Qwen-MT 语种参数错误 | 跳过剩余 MT，切换通用模型 |
+| 其他 `400` | 原样返回，不掩盖请求问题 |
+| `401 InvalidApiKey` | 原样返回，不重复发送 |
+
+若响应包含 `Retry-After`，优先采用服务端给出的等待时间。非流式请求可以在返回内容前安全切换；流式请求一旦已经向客户端发送内容，就不会中途拼接另一模型的输出。
+
+## 开发与验证
+
+```bash
+pnpm --dir dashboard run lint
+pnpm --dir dashboard run build
+python3 -m py_compile aliyun_proxy.py test_aliyun_proxy.py
+python3 -m unittest -v test_aliyun_proxy.py
+```
+
+前端开发服务器：
+
+```bash
+pnpm --dir dashboard run dev
+```
+
+Vite 会把统计接口代理到正在运行的 `127.0.0.1:39281` 服务。
+
+## 安全边界
+
+- 服务默认仅绑定 `127.0.0.1`，不会监听局域网或公网地址。
+- Chat Completions、模型列表和完整状态接口要求本地 Bearer Key。
+- 统计页面与统计数据接口不要求 Key，但仅包含计数、延迟、Token 汇总和进程资源信息。
+- 日志不记录请求正文、完整提示词或 API Key；Qwen-MT 只记录目标语言代码与正文字符数。
+- 仓库不会提交 `.aliyun-proxy/`、`*.key`、日志、前端依赖或构建产物。

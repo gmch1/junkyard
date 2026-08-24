@@ -15,5 +15,9 @@
 
 **/.build/
 **/build/
+**/dist/
+**/node_modules/
+**/__pycache__/
+**/.aliyun-proxy/
 **/DerivedData/
 **/*.xcuserstate
