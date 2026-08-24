@@ -89,8 +89,8 @@ jobs:
           backend="$app/Contents/MacOS/AliyunLLMProxyBackend"
           plutil -lint "$app/Contents/Info.plist"
           codesign --verify --deep --strict "$app"
-          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/AliyunLLMProxy"
-          lipo -verify_arch x86_64 arm64 "$backend"
+          lipo "$app/Contents/MacOS/AliyunLLMProxy" -verify_arch x86_64 arm64
+          lipo "$backend" -verify_arch x86_64 arm64
 
           state_dir="$(mktemp -d /tmp/aliyun-macos-ci.XXXXXX)"
           export ALIYUN_PROXY_STATE_DIR="$state_dir"
