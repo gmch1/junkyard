@@ -4,7 +4,7 @@ GitHub Actions 使用固定的自签名代码签名证书
 `AliyunLLMProxy-Release.pem`。SHA-256 指纹为：
 
 ```text
-9933920ab5b4208e62bab6260afc8360632524d87bd90d8fe996ab272f286256
+08f038e3075c7ff3923a678338296a52ebdd5f0cf0658fbac0c4c318b73f2045
 ```
 
 加密后的 PKCS#12 文件和密码分别保存在仓库的
