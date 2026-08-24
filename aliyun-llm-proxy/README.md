@@ -30,7 +30,7 @@
 
 项目提供轻量 macOS 菜单栏应用，不显示 Dock 图标或前台主窗口。启动后应用会拉起内置的静态 Go 后端并打开浏览器管理页，用于填写 DashScope API Key，以及展示可复制的 Base URL、客户端 API Key 和模型名称；不依赖系统 Python 或 Docker。
 
-macOS 应用默认在 `39281` 端口监听局域网，OpenAI 接口仍要求客户端 Bearer Key；不要把该端口转发到公网。网页管理与密钥写入只允许从本机访问，Key 和配置保存到 `~/Library/Application Support/AliyunLLMProxy/`。菜单栏可随时打开管理页、复制连接信息、启动或停止服务。
+macOS 应用默认在 `39281` 端口监听局域网，OpenAI 接口仍要求客户端 Bearer Key；不要把该端口转发到公网。网页管理与密钥写入只允许从本机访问，Key 和配置保存到 `~/Library/Application Support/AliyunLLMProxy/`。菜单栏只负责打开管理页和退出：App 运行时代理自动运行，退出 App 时代理自动停止，连接信息统一在网页中复制。
 
 GitHub Actions 会构建同时支持 Apple Silicon 和 Intel Mac 的 ZIP Artifact。本地构建方法和应用说明见 [`macos-app/README.md`](./macos-app/README.md)。原有 Python CLI、本地 Dashboard 和默认回环监听行为保持不变。
 

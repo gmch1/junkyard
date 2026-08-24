@@ -1,9 +1,7 @@
 import AppKit
-import Darwin
 import Foundation
 
 private let servicePort = 39281
-private let modelAlias = "aliyun-translate-auto"
 private let managementURL = URL(string: "http://127.0.0.1:\(servicePort)/")!
 
 private struct BackendError: LocalizedError {
@@ -37,7 +35,7 @@ private final class BackendController {
     }
 
     @discardableResult
-    func run(_ arguments: [String]) throws -> String {
+    private func run(_ arguments: [String]) throws -> String {
         guard let executableURL else {
             throw BackendError(message: "应用包内缺少代理程序，请重新安装应用。")
         }
@@ -69,27 +67,24 @@ private final class BackendController {
         ) ?? ""
         guard process.terminationStatus == 0 else {
             let detail = error.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw BackendError(message: detail.isEmpty ? "代理操作失败。" : detail)
+            throw BackendError(message: detail.isEmpty ? "代理服务操作失败。" : detail)
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func start() throws { _ = try run(["start"]) }
+    func ensureRunning() throws { _ = try run(["start"]) }
     func stop() throws { _ = try run(["stop"]) }
-    func status() throws { _ = try run(["status"]) }
-    func clientKey() throws -> String { try run(["key"]) }
 }
 
-private final class MenuBarController: NSObject, NSMenuDelegate {
+private final class MenuBarController: NSObject {
     private let backend = BackendController()
+    private let backendQueue = DispatchQueue(label: "io.github.gmch1.AliyunLLMProxy.backend")
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
-    private let statusMenuItem = NSMenuItem(title: "正在启动服务…", action: nil, keyEquivalent: "")
-    private let toggleMenuItem = NSMenuItem(title: "停止服务", action: nil, keyEquivalent: "")
-    private var serviceRunning = false
-    private var refreshTimer: Timer?
-    private var operationInProgress = false
+    private var monitorTimer: Timer?
+    private var ensureInProgress = false
     private var managementOpenPending = false
+    private var shuttingDown = false
 
     override init() {
         super.init()
@@ -97,14 +92,11 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         configureMenu()
     }
 
-    deinit { refreshTimer?.invalidate() }
+    deinit { monitorTimer?.invalidate() }
 
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
-        let image = NSImage(
-            systemSymbolName: "network",
-            accessibilityDescription: "阿里云模型代理"
-        )
+        let image = NSImage(systemSymbolName: "network", accessibilityDescription: "阿里云模型代理")
         image?.isTemplate = true
         button.image = image
         if image == nil { button.title = "A" }
@@ -112,34 +104,12 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func configureMenu() {
-        menu.delegate = self
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
-        menu.addItem(.separator())
-
         let openItem = NSMenuItem(title: "打开管理页面", action: #selector(openManagementPage), keyEquivalent: "o")
         openItem.target = self
         menu.addItem(openItem)
-
-        let copyBaseURL = NSMenuItem(title: "复制 Base URL", action: #selector(copyBaseURL), keyEquivalent: "")
-        copyBaseURL.target = self
-        menu.addItem(copyBaseURL)
-
-        let copyAPIKey = NSMenuItem(title: "复制客户端 API Key", action: #selector(copyClientKey), keyEquivalent: "")
-        copyAPIKey.target = self
-        menu.addItem(copyAPIKey)
-
-        let copyModel = NSMenuItem(title: "复制模型名称", action: #selector(copyModelAlias), keyEquivalent: "")
-        copyModel.target = self
-        menu.addItem(copyModel)
-
         menu.addItem(.separator())
-        toggleMenuItem.target = self
-        toggleMenuItem.action = #selector(toggleService)
-        menu.addItem(toggleMenuItem)
 
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "停止服务并退出", action: #selector(stopAndQuit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出", action: #selector(quitApplication), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         statusItem.menu = menu
@@ -147,93 +117,54 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
 
     func launch() {
         managementOpenPending = true
-        setStatus(title: "正在启动服务…", running: false)
-        performBackendOperation(resultRunning: true) { backend in
-            try backend.start()
-        }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
-            self?.refreshStatus()
+        ensureProxyRunning(presentErrors: true)
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
+            self?.ensureProxyRunning(presentErrors: false)
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        refreshStatus()
-    }
+    func shutdown() {
+        guard !shuttingDown else { return }
+        shuttingDown = true
+        monitorTimer?.invalidate()
+        monitorTimer = nil
+        managementOpenPending = false
 
-    private func refreshStatus() {
-        guard !operationInProgress else { return }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let running = (try? self.backend.status()) != nil
-            DispatchQueue.main.async {
-                self.setStatus(title: running ? "代理服务运行中" : "代理服务已停止", running: running)
-            }
-        }
-    }
-
-    private func setStatus(title: String, running: Bool) {
-        serviceRunning = running
-        statusMenuItem.title = title
-        toggleMenuItem.title = running ? "停止服务" : "启动服务"
-        toggleMenuItem.isEnabled = !operationInProgress
-        statusItem.button?.toolTip = "阿里云模型代理 · \(running ? "运行中" : "已停止")"
-    }
-
-    private func performBackendOperation(
-        resultRunning: Bool,
-        operation: @escaping (BackendController) throws -> Void
-    ) {
-        guard !operationInProgress else { return }
-        operationInProgress = true
-        toggleMenuItem.isEnabled = false
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                try operation(self.backend)
-                DispatchQueue.main.async {
-                    self.operationInProgress = false
-                    self.setStatus(
-                        title: resultRunning ? "代理服务运行中" : "代理服务已停止",
-                        running: resultRunning
-                    )
-                    self.continuePendingManagementOpen(serviceRunning: resultRunning)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.operationInProgress = false
-                    self.managementOpenPending = false
-                    self.setStatus(title: "服务操作失败", running: false)
-                    self.showError(error.localizedDescription)
-                }
-            }
+        backendQueue.sync {
+            try? self.backend.stop()
         }
     }
 
     @objc func openManagementPage() {
         managementOpenPending = true
-        if operationInProgress {
-            statusMenuItem.title = "服务就绪后将打开管理页面…"
-            return
-        }
-        setStatus(title: "正在检查管理服务…", running: serviceRunning)
-        performBackendOperation(resultRunning: true) { backend in
-            try backend.start()
+        ensureProxyRunning(presentErrors: true)
+    }
+
+    private func ensureProxyRunning(presentErrors: Bool) {
+        guard !shuttingDown, !ensureInProgress else { return }
+        ensureInProgress = true
+        backendQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.backend.ensureRunning()
+                DispatchQueue.main.async {
+                    guard !self.shuttingDown else { return }
+                    self.ensureInProgress = false
+                    self.openManagementPageIfNeeded()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard !self.shuttingDown else { return }
+                    self.ensureInProgress = false
+                    let shouldPresent = presentErrors || self.managementOpenPending
+                    self.managementOpenPending = false
+                    if shouldPresent { self.showError(error.localizedDescription) }
+                }
+            }
         }
     }
 
-    private func continuePendingManagementOpen(serviceRunning: Bool) {
-        guard managementOpenPending else { return }
-        if serviceRunning {
-            scheduleBrowserOpen()
-            return
-        }
-        setStatus(title: "正在启动服务…", running: false)
-        performBackendOperation(resultRunning: true) { backend in
-            try backend.start()
-        }
-    }
-
-    private func scheduleBrowserOpen() {
+    private func openManagementPageIfNeeded() {
         guard managementOpenPending else { return }
         managementOpenPending = false
         DispatchQueue.main.async { [weak self] in
@@ -274,54 +205,8 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleService() {
-        let shouldStop = serviceRunning
-        setStatus(title: shouldStop ? "正在停止服务…" : "正在启动服务…", running: serviceRunning)
-        performBackendOperation(resultRunning: !shouldStop) { backend in
-            if shouldStop { try backend.stop() } else { try backend.start() }
-        }
-    }
-
-    @objc private func copyBaseURL() {
-        copy("http://\(localIPv4Address()):\(servicePort)/v1")
-    }
-
-    @objc private func copyClientKey() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let key = try self.backend.clientKey()
-                DispatchQueue.main.async { self.copy(key) }
-            } catch {
-                DispatchQueue.main.async { self.showError(error.localizedDescription) }
-            }
-        }
-    }
-
-    @objc private func copyModelAlias() { copy(modelAlias) }
-
-    private func copy(_ value: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-    }
-
-    @objc private func stopAndQuit() {
-        operationInProgress = true
-        toggleMenuItem.isEnabled = false
-        statusMenuItem.title = "正在停止服务…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                try self.backend.stop()
-                DispatchQueue.main.async { NSApp.terminate(nil) }
-            } catch {
-                DispatchQueue.main.async {
-                    self.operationInProgress = false
-                    self.showError(error.localizedDescription)
-                    self.refreshStatus()
-                }
-            }
-        }
+    @objc private func quitApplication() {
+        NSApp.terminate(nil)
     }
 
     private func showError(_ message: String) {
@@ -333,37 +218,6 @@ private final class MenuBarController: NSObject, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
-}
-
-private func localIPv4Address() -> String {
-    var pointer: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&pointer) == 0, let first = pointer else { return "127.0.0.1" }
-    defer { freeifaddrs(pointer) }
-    var candidates: [(String, String)] = []
-    for item in sequence(first: first, next: { $0.pointee.ifa_next }) {
-        let interface = item.pointee
-        guard let address = interface.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) else { continue }
-        let flags = Int32(interface.ifa_flags)
-        guard flags & IFF_UP != 0, flags & IFF_RUNNING != 0, flags & IFF_LOOPBACK == 0 else { continue }
-        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let result = getnameinfo(
-            address,
-            socklen_t(MemoryLayout<sockaddr_in>.size),
-            &host,
-            socklen_t(host.count),
-            nil,
-            0,
-            NI_NUMERICHOST
-        )
-        guard result == 0 else { continue }
-        let value = String(cString: host)
-        guard !value.hasPrefix("169.254.") else { continue }
-        candidates.append((String(cString: interface.ifa_name), value))
-    }
-    for preferred in ["en0", "en1"] {
-        if let match = candidates.first(where: { $0.0 == preferred }) { return match.1 }
-    }
-    return candidates.first?.1 ?? "127.0.0.1"
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -379,6 +233,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         menuBarController?.openManagementPage()
         return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        menuBarController?.shutdown()
     }
 }
 
