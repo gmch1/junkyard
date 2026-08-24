@@ -25,6 +25,7 @@ import {
   IconCpu,
   IconDatabase,
   IconRouteAltLeft,
+  IconTrophy,
 } from '@tabler/icons-react'
 import './App.css'
 
@@ -57,6 +58,13 @@ export type ModelMetrics = {
   last_latency_ms: number
   input_tokens: number
   output_tokens: number
+  attempts: number
+  adoptions: number
+  adoption_rate: number
+  hedge_participations: number
+  hedge_wins: number
+  hedge_win_rate: number
+  discarded_responses: number
   cooldown_seconds: number
   cooldown_reason: string
   unavailable: boolean
@@ -75,6 +83,12 @@ type DashboardData = {
     model_successes: number
     model_failures: number
     upstream_attempts: number
+    adoptions: number
+    adoption_rate: number
+    hedged_requests: number
+    hedge_wins: number
+    hedge_win_rate: number
+    discarded_responses: number
     in_flight: number
     requests_last_minute: number
     input_tokens: number
@@ -137,7 +151,7 @@ function MetricCard({ title, value, detail, icon: Icon, color }: MetricCardProps
 function ChartsFallback() {
   return (
     <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="lg">
-      {['请求分配', '模型响应延迟'].map((title) => (
+      {['响应采纳', '模型响应延迟'].map((title) => (
         <Paper key={title} radius="lg" p="lg" withBorder>
           <Stack gap="md">
             <Text fw={700}>{title}</Text>
@@ -150,16 +164,17 @@ function ChartsFallback() {
 }
 
 function ModelsTable({ models }: { models: ModelMetrics[] }) {
-  const totalSuccesses = models.reduce((sum, model) => sum + model.successes, 0)
-
   return (
     <ScrollArea>
-      <Table className="models-table" verticalSpacing="sm" horizontalSpacing="md" miw={1180}>
+      <Table className="models-table" verticalSpacing="sm" horizontalSpacing="md" miw={1450}>
         <Table.Thead>
           <Table.Tr>
             <Table.Th>模型</Table.Th>
             <Table.Th>状态</Table.Th>
-            <Table.Th>成功占比</Table.Th>
+            <Table.Th>采纳率</Table.Th>
+            <Table.Th ta="right">采纳 / 参与</Table.Th>
+            <Table.Th ta="right">竞速胜出</Table.Th>
+            <Table.Th ta="right">丢弃</Table.Th>
             <Table.Th ta="right">成功 / 失败</Table.Th>
             <Table.Th ta="right">限流</Table.Th>
             <Table.Th ta="right">平均 / P95 / 最近</Table.Th>
@@ -170,7 +185,6 @@ function ModelsTable({ models }: { models: ModelMetrics[] }) {
         <Table.Tbody>
           {models.map((model) => {
             const state = modelState(model)
-            const share = totalSuccesses ? (model.successes / totalSuccesses) * 100 : 0
             const reason = model.unavailable_reason || model.cooldown_reason
             return (
               <Table.Tr key={model.id}>
@@ -185,10 +199,17 @@ function ModelsTable({ models }: { models: ModelMetrics[] }) {
                 </Table.Td>
                 <Table.Td>
                   <Group gap="xs" wrap="nowrap">
-                    <Progress value={share} color="teal" size="sm" w={82} radius="xl" />
-                    <Text size="xs" c="dimmed" w={42}>{share.toFixed(1)}%</Text>
+                    <Progress value={model.adoption_rate} color="teal" size="sm" w={82} radius="xl" />
+                    <Text size="xs" c="dimmed" w={42}>{model.adoption_rate.toFixed(1)}%</Text>
                   </Group>
                 </Table.Td>
+                <Table.Td ta="right">{model.adoptions} / {model.attempts}</Table.Td>
+                <Table.Td ta="right">
+                  {model.hedge_participations
+                    ? `${model.hedge_wins} / ${model.hedge_participations} (${model.hedge_win_rate.toFixed(1)}%)`
+                    : '—'}
+                </Table.Td>
+                <Table.Td ta="right">{model.discarded_responses}</Table.Td>
                 <Table.Td ta="right">
                   <Text size="sm"><Text span c="teal" fw={650}>{model.successes}</Text> / <Text span c="red">{model.failures}</Text></Text>
                 </Table.Td>
@@ -277,7 +298,7 @@ function App() {
             </Alert>
           )}
 
-          <SimpleGrid cols={{ base: 1, xs: 2, md: 3, lg: 6 }} spacing="md">
+          <SimpleGrid cols={{ base: 1, xs: 2, md: 3, lg: 4 }} spacing="md">
             <MetricCard
               title="客户端请求"
               value={formatInteger(data?.client.requests ?? 0)}
@@ -288,9 +309,16 @@ function App() {
             <MetricCard
               title="请求成功率"
               value={data?.client.requests ? `${successRate.toFixed(1)}%` : '—'}
-              detail={`上游尝试 ${formatInteger(data?.totals.upstream_attempts ?? 0)} 次`}
+              detail={`采纳 ${formatInteger(data?.totals.adoptions ?? 0)} · 上游尝试 ${formatInteger(data?.totals.upstream_attempts ?? 0)}`}
               icon={IconBrandSpeedtest}
               color="teal"
+            />
+            <MetricCard
+              title="竞速救回"
+              value={data?.totals.hedged_requests ? `${data.totals.hedge_wins} / ${data.totals.hedged_requests}` : '—'}
+              detail={`胜率 ${(data?.totals.hedge_win_rate ?? 0).toFixed(1)}% · 丢弃 ${formatInteger(data?.totals.discarded_responses ?? 0)}`}
+              icon={IconTrophy}
+              color="yellow"
             />
             <MetricCard
               title="端到端延迟"
@@ -331,7 +359,7 @@ function App() {
               <Group justify="space-between">
                 <Box>
                   <Text fw={700}>模型明细</Text>
-                  <Text size="sm" c="dimmed">状态、限流、延迟、请求占比与 Token 用量</Text>
+                  <Text size="sm" c="dimmed">状态、采纳率、竞速胜率、延迟、限流与 Token 用量</Text>
                 </Box>
                 <Badge variant="light">{data?.models.length ?? 0} 个模型</Badge>
               </Group>

@@ -31,11 +31,12 @@ function EmptyChart() {
 const RequestDistributionChart = memo(function RequestDistributionChart({ models }: { models: ModelMetrics[] }) {
   const data = useMemo(
     () => models
-      .filter((model) => model.successes || model.failures)
-      .sort((a, b) => (b.successes + b.failures) - (a.successes + a.failures))
+      .filter((model) => model.attempts)
+      .sort((a, b) => b.attempts - a.attempts)
       .map((model) => ({
         name: shortenModelName(model.id),
-        成功: model.successes,
+        采纳: model.adoptions,
+        丢弃: model.discarded_responses,
         失败: model.failures,
       })),
     [models],
@@ -52,7 +53,8 @@ const RequestDistributionChart = memo(function RequestDistributionChart({ models
           <YAxis dataKey="name" type="category" width={185} tick={{ fill: 'var(--chart-label)', fontSize: 12 }} />
           <Tooltip cursor={{ fill: 'var(--chart-hover)' }} />
           <Legend />
-          <Bar dataKey="成功" stackId="requests" fill="#12b886" radius={[0, 4, 4, 0]} isAnimationActive={false} />
+          <Bar dataKey="采纳" stackId="requests" fill="#12b886" radius={[0, 4, 4, 0]} isAnimationActive={false} />
+          <Bar dataKey="丢弃" stackId="requests" fill="#fd7e14" radius={[0, 4, 4, 0]} isAnimationActive={false} />
           <Bar dataKey="失败" stackId="requests" fill="#fa5252" radius={[0, 4, 4, 0]} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
@@ -98,8 +100,8 @@ function ChartPanels({ models }: { models: ModelMetrics[] }) {
       <Paper radius="lg" p="lg" withBorder>
         <Stack gap="md">
           <Box>
-            <Text fw={700}>请求分配</Text>
-            <Text size="sm" c="dimmed">每个上游模型处理成功或失败的次数</Text>
+            <Text fw={700}>响应采纳</Text>
+            <Text size="sm" c="dimmed">各模型被采纳、竞速丢弃或失败的次数</Text>
           </Box>
           <RequestDistributionChart models={models} />
         </Stack>

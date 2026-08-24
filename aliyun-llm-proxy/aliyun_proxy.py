@@ -11,6 +11,7 @@ import json
 import logging
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import signal
@@ -40,7 +41,7 @@ LEGACY_CLIENT_KEY_FILE = ROOT / ".translategemma" / "server.key"
 DASHBOARD_DIST = ROOT / "dashboard" / "dist"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "version": 5,
+    "version": 6,
     "host": "127.0.0.1",
     "port": 39281,
     "upstream_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -49,6 +50,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "route_wait_seconds": 2,
     "rpm_safety_ratio": 0.90,
     "default_cooldown_seconds": 60,
+    "hedging": {
+        "enabled": True,
+        "delay_seconds": 5,
+        "max_concurrent_backups": 4,
+    },
     "models": [
         {
             "id": "deepseek-v4-flash",
@@ -495,6 +501,15 @@ def ensure_config() -> Dict[str, Any]:
             encoding="utf-8",
         )
         temporary.replace(CONFIG_FILE)
+    if int(config.get("version", 1)) < 6:
+        config.setdefault("hedging", copy.deepcopy(DEFAULT_CONFIG["hedging"]))
+        config["version"] = 6
+        temporary = CONFIG_FILE.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(CONFIG_FILE)
     validate_config(config)
     return config
 
@@ -514,6 +529,13 @@ def validate_config(config: Dict[str, Any]) -> None:
     ids = [str(model.get("id", "")).strip() for model in enabled]
     if any(not model_id for model_id in ids) or len(ids) != len(set(ids)):
         raise SystemExit("Enabled model IDs must be non-empty and unique")
+    hedging = config.get("hedging", {})
+    if not isinstance(hedging, dict):
+        raise SystemExit("hedging must be an object")
+    if float(hedging.get("delay_seconds", 5)) <= 0:
+        raise SystemExit("hedging.delay_seconds must be greater than zero")
+    if int(hedging.get("max_concurrent_backups", 4)) < 1:
+        raise SystemExit("hedging.max_concurrent_backups must be at least one")
 
 
 class UnavailableStore:
@@ -608,6 +630,10 @@ class ModelState:
     total_latency_ms: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    adoptions: int = 0
+    hedge_participations: int = 0
+    hedge_wins: int = 0
+    discarded_responses: int = 0
     cooldown_until: float = 0.0
     cooldown_reason: str = ""
     unavailable: bool = False
@@ -652,8 +678,14 @@ class ModelPool:
         rps = max(1, int((state.config.get("rpm", 600) / 60.0) * self.safety_ratio))
         return len(state.request_times) < rpm and len(state.second_times) < rps
 
-    def acquire(self, excluded: Set[str], require_incremental_stream: bool = False) -> Optional[ModelState]:
-        deadline = time.monotonic() + self.route_wait_seconds
+    def acquire(
+        self,
+        excluded: Set[str],
+        require_incremental_stream: bool = False,
+        wait_seconds: Optional[float] = None,
+    ) -> Optional[ModelState]:
+        wait = self.route_wait_seconds if wait_seconds is None else max(0.0, wait_seconds)
+        deadline = time.monotonic() + wait
         while True:
             now = time.monotonic()
             with self.lock:
@@ -692,6 +724,20 @@ class ModelPool:
                 state.cooldown_until = 0
                 state.cooldown_reason = ""
 
+    def mark_hedge_participation(self, state: ModelState) -> None:
+        with self.lock:
+            state.hedge_participations += 1
+
+    def adopt(self, state: ModelState, hedge_winner: bool) -> None:
+        with self.lock:
+            state.adoptions += 1
+            if hedge_winner:
+                state.hedge_wins += 1
+
+    def discard(self, state: ModelState) -> None:
+        with self.lock:
+            state.discarded_responses += 1
+
     def failure(
         self,
         state: ModelState,
@@ -722,6 +768,13 @@ class ModelPool:
             for state in self.states:
                 self._purge(state, now)
                 average = state.total_latency_ms / state.successes if state.successes else 0
+                attempts = state.successes + state.failures
+                adoption_rate = state.adoptions / attempts * 100 if attempts else 0
+                hedge_win_rate = (
+                    state.hedge_wins / state.hedge_participations * 100
+                    if state.hedge_participations
+                    else 0
+                )
                 latencies = sorted(state.latencies_ms)
                 p50_index = max(0, int(len(latencies) * 0.50 + 0.9999) - 1)
                 p95_index = max(0, int(len(latencies) * 0.95 + 0.9999) - 1)
@@ -744,6 +797,13 @@ class ModelPool:
                         "last_latency_ms": round(state.latencies_ms[-1], 1) if state.latencies_ms else 0,
                         "input_tokens": state.input_tokens,
                         "output_tokens": state.output_tokens,
+                        "attempts": attempts,
+                        "adoptions": state.adoptions,
+                        "adoption_rate": round(adoption_rate, 1),
+                        "hedge_participations": state.hedge_participations,
+                        "hedge_wins": state.hedge_wins,
+                        "hedge_win_rate": round(hedge_win_rate, 1),
+                        "discarded_responses": state.discarded_responses,
                         "cooldown_seconds": round(max(0, state.cooldown_until - now), 1),
                         "cooldown_reason": state.cooldown_reason,
                         "unavailable": state.unavailable,
@@ -759,6 +819,25 @@ class UpstreamResponse:
     headers: Dict[str, str]
     body: bytes
     stream: Optional[Any] = None
+    prefetched: bytes = b""
+
+
+@dataclass
+class AttemptResult:
+    state: ModelState
+    lane: str
+    response: Optional[UpstreamResponse]
+    success: bool
+    retry: bool
+    exclude_low_frequency: bool = False
+    exclude_mt: bool = False
+
+
+@dataclass
+class RouteRace:
+    results: Any = field(default_factory=queue.Queue)
+    lock: Any = field(default_factory=threading.Lock)
+    resolved: bool = False
 
 
 def parse_error(body: bytes) -> Tuple[str, str]:
@@ -854,6 +933,14 @@ class AliyunProxy:
         self.upstream_key = upstream_key
         self.unavailable_store = unavailable_store or UnavailableStore(None)
         self.pool = ModelPool(config, self.unavailable_store.snapshot())
+        self.hedging_config = config.get("hedging", {})
+        self.hedging_enabled = bool(self.hedging_config.get("enabled", True))
+        self.hedge_delay_seconds = float(
+            self.hedging_config.get("delay_seconds", 5)
+        )
+        self.hedge_slots = threading.BoundedSemaphore(
+            int(self.hedging_config.get("max_concurrent_backups", 4))
+        )
         self.started_at = time.time()
         self.log = logging.getLogger("aliyun-proxy")
         self.metrics_lock = threading.Lock()
@@ -862,6 +949,7 @@ class AliyunProxy:
         self.client_failures = 0
         self.client_total_latency_ms = 0.0
         self.client_latencies_ms: Deque[float] = deque(maxlen=500)
+        self.hedged_requests = 0
         self.process_sample_at = 0.0
         self.process_sample = {"rss_mb": 0.0, "cpu_percent": 0.0}
 
@@ -988,139 +1076,308 @@ class AliyunProxy:
             )
             headers = {key.lower(): value for key, value in response.headers.items()}
             if stream:
-                return UpstreamResponse(response.status, headers, b"", response)
+                try:
+                    reader = getattr(response, "read1", response.read)
+                    first_chunk = reader(8192)
+                except OSError:
+                    response.close()
+                    raise
+                return UpstreamResponse(
+                    response.status,
+                    headers,
+                    b"",
+                    response,
+                    first_chunk,
+                )
             with response:
                 return UpstreamResponse(response.status, headers, response.read())
         except urllib.error.HTTPError as error:
             headers = {key.lower(): value for key, value in error.headers.items()}
             return UpstreamResponse(error.code, headers, error.read())
 
-    def route(self, body: Dict[str, Any], stream: bool) -> Tuple[UpstreamResponse, Optional[ModelState], List[str]]:
-        excluded: Set[str] = set()
-        attempts: List[str] = []
-        last_response: Optional[UpstreamResponse] = None
-        default_cooldown = float(self.config.get("default_cooldown_seconds", 60))
-
-        while len(excluded) < len(self.pool.states):
-            state = self.pool.acquire(excluded, require_incremental_stream=stream)
-            if state is None:
-                break
-            excluded.add(state.model_id)
-            attempts.append(state.model_id)
-            started = time.monotonic()
-            try:
-                response = self.upstream_request(body, state, stream)
-            except QwenMTUnsupportedLanguage as error:
-                latency = (time.monotonic() - started) * 1000
-                self.pool.failure(state, "unsupported_target_language", 0, False)
-                if error.language_code is None:
-                    excluded.update(
-                        candidate.model_id
-                        for candidate in self.pool.states
-                        if candidate.config.get("adapter") == "qwen-mt"
-                    )
-                safe_target = (
-                    error.raw_target.replace("\r", "\\r").replace("\n", "\\n")[:80]
-                )
-                self.log.info(
-                    "model=%s adapter=qwen-mt skipped=true target_lang_raw=%s target_lang=%s reason=unsupported_by_model fallback=true latency_ms=%.1f",
-                    state.model_id,
-                    json.dumps(safe_target, ensure_ascii=False),
-                    error.language_code or "unmapped",
-                    latency,
-                )
-                continue
-            except (OSError, urllib.error.URLError) as error:
-                latency = (time.monotonic() - started) * 1000
-                self.pool.failure(state, type(error).__name__, 5, False)
-                self.log.warning(
-                    "model=%s transport_error=%s latency_ms=%.1f fallback=true",
-                    state.model_id,
-                    error,
-                    latency,
-                )
-                continue
-
+    def _perform_attempt(
+        self,
+        body: Dict[str, Any],
+        state: ModelState,
+        stream: bool,
+        lane: str,
+    ) -> AttemptResult:
+        started = time.monotonic()
+        try:
+            response = self.upstream_request(body, state, stream)
+        except QwenMTUnsupportedLanguage as error:
             latency = (time.monotonic() - started) * 1000
-            if 200 <= response.status < 300:
-                if stream:
-                    self.log.info(
-                        "model=%s status=%s stream=true connect_ms=%.1f attempts=%s",
-                        state.model_id,
-                        response.status,
-                        latency,
-                        ",".join(attempts),
-                    )
-                    return response, state, attempts
-                usage = extract_usage(response.body)
-                self.pool.success(state, latency, usage)
-                self.log.info(
-                    "model=%s status=%s latency_ms=%.1f prompt_tokens=%s completion_tokens=%s attempts=%s",
-                    state.model_id,
-                    response.status,
-                    latency,
-                    usage.get("prompt_tokens", 0),
-                    usage.get("completion_tokens", 0),
-                    ",".join(attempts),
-                )
-                return response, state, attempts
+            self.pool.failure(state, "unsupported_target_language", 0, False)
+            safe_target = error.raw_target.replace("\r", "\\r").replace("\n", "\\n")[:80]
+            self.log.info(
+                "model=%s lane=%s adapter=qwen-mt skipped=true target_lang_raw=%s target_lang=%s reason=unsupported_by_model fallback=true latency_ms=%.1f",
+                state.model_id,
+                lane,
+                json.dumps(safe_target, ensure_ascii=False),
+                error.language_code or "unmapped",
+                latency,
+            )
+            return AttemptResult(
+                state,
+                lane,
+                None,
+                False,
+                True,
+                exclude_mt=error.language_code is None,
+            )
+        except (OSError, urllib.error.URLError) as error:
+            latency = (time.monotonic() - started) * 1000
+            self.pool.failure(state, type(error).__name__, 5, False)
+            self.log.warning(
+                "model=%s lane=%s transport_error=%s latency_ms=%.1f fallback=true",
+                state.model_id,
+                lane,
+                error,
+                latency,
+            )
+            return AttemptResult(state, lane, None, False, True)
+        except Exception as error:
+            latency = (time.monotonic() - started) * 1000
+            self.pool.failure(state, type(error).__name__, 5, False)
+            self.log.exception(
+                "model=%s lane=%s unexpected_error=%s latency_ms=%.1f fallback=true",
+                state.model_id,
+                lane,
+                type(error).__name__,
+                latency,
+            )
+            return AttemptResult(state, lane, None, False, True)
 
-            code, message = parse_error(response.body)
-            mt_language_error = is_qwen_mt_language_error(
+        latency = (time.monotonic() - started) * 1000
+        if 200 <= response.status < 300:
+            usage = {} if stream else extract_usage(response.body)
+            self.pool.success(state, latency, usage)
+            self.log.info(
+                "model=%s lane=%s status=%s stream=%s response_ms=%.1f prompt_tokens=%s completion_tokens=%s",
+                state.model_id,
+                lane,
+                response.status,
+                str(stream).lower(),
+                latency,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            return AttemptResult(state, lane, response, True, False)
+
+        code, message = parse_error(response.body)
+        mt_language_error = is_qwen_mt_language_error(
+            response.status,
+            code,
+            message,
+            state.config,
+        )
+        permanently_unavailable = should_disable_model(
+            response.status, code, message, state.config
+        )
+        if permanently_unavailable:
+            retry, cooldown, throttled = True, 0, False
+        elif mt_language_error:
+            retry, cooldown, throttled = True, 0, False
+        else:
+            retry, cooldown, throttled = classify_retry(
+                response.status,
+                code,
+                response.headers,
+                float(self.config.get("default_cooldown_seconds", 60)),
+            )
+        self.pool.failure(
+            state,
+            code or ("HTTP %s" % response.status),
+            cooldown,
+            throttled,
+        )
+        if permanently_unavailable:
+            reason = code or message or ("HTTP %s" % response.status)
+            self.pool.disable(state, reason)
+            self.unavailable_store.mark(
+                state.model_id,
                 response.status,
                 code,
                 message,
-                state.config,
             )
-            permanently_unavailable = should_disable_model(
-                response.status, code, message, state.config
+        self.log.warning(
+            "model=%s lane=%s status=%s code=%s cooldown=%.1f fallback=%s message=%s",
+            state.model_id,
+            lane,
+            response.status,
+            code,
+            cooldown,
+            str(retry).lower(),
+            message[:300].replace("\n", " "),
+        )
+        return AttemptResult(
+            state,
+            lane,
+            response,
+            False,
+            retry,
+            exclude_low_frequency=(
+                throttled and state.config.get("rate_class") == "low-frequency"
+            ),
+            exclude_mt=mt_language_error,
+        )
+
+    def _discard_attempt(self, result: AttemptResult) -> None:
+        if result.response is not None and result.response.stream is not None:
+            try:
+                result.response.stream.close()
+            except OSError:
+                pass
+        self.pool.discard(result.state)
+        self.log.info(
+            "model=%s lane=%s discarded=true reason=faster_response_selected",
+            result.state.model_id,
+            result.lane,
+        )
+
+    def _publish_attempt(self, race: RouteRace, result: AttemptResult) -> None:
+        with race.lock:
+            if not race.resolved:
+                race.results.put(result)
+                return
+        if result.success:
+            self._discard_attempt(result)
+
+    def _attempt_worker(
+        self,
+        race: RouteRace,
+        body: Dict[str, Any],
+        state: ModelState,
+        stream: bool,
+        lane: str,
+        hedge_slot: bool,
+    ) -> None:
+        try:
+            result = self._perform_attempt(body, state, stream, lane)
+        finally:
+            if hedge_slot:
+                self.hedge_slots.release()
+        self._publish_attempt(race, result)
+
+    def _resolve_race(self, race: RouteRace) -> List[AttemptResult]:
+        queued: List[AttemptResult] = []
+        with race.lock:
+            race.resolved = True
+            while True:
+                try:
+                    queued.append(race.results.get_nowait())
+                except queue.Empty:
+                    break
+        return queued
+
+    def route(
+        self,
+        body: Dict[str, Any],
+        stream: bool,
+    ) -> Tuple[UpstreamResponse, Optional[ModelState], List[str]]:
+        race = RouteRace()
+        excluded: Set[str] = set()
+        attempts: List[str] = []
+        last_response: Optional[UpstreamResponse] = None
+        active = 0
+        hedge_checked = False
+        hedge_launched = False
+        route_started = time.monotonic()
+        hedge_deadline = route_started + self.hedge_delay_seconds
+
+        def start_attempt(lane: str, wait_seconds: Optional[float]) -> bool:
+            nonlocal active
+            hedge_slot = lane == "hedge"
+            if hedge_slot and not self.hedge_slots.acquire(blocking=False):
+                return False
+            state = self.pool.acquire(
+                excluded,
+                require_incremental_stream=stream,
+                wait_seconds=wait_seconds,
             )
-            if permanently_unavailable:
-                retry, cooldown, throttled = True, 0, False
-            elif mt_language_error:
-                retry, cooldown, throttled = True, 0, False
-            else:
-                retry, cooldown, throttled = classify_retry(
-                    response.status,
-                    code,
-                    response.headers,
-                    default_cooldown,
-                )
-            self.pool.failure(state, code or ("HTTP %s" % response.status), cooldown, throttled)
-            if permanently_unavailable:
-                reason = code or message or ("HTTP %s" % response.status)
-                self.pool.disable(state, reason)
-                self.unavailable_store.mark(
-                    state.model_id,
-                    response.status,
-                    code,
-                    message,
-                )
-            last_response = response
-            if throttled and state.config.get("rate_class") == "low-frequency":
+            if state is None:
+                if hedge_slot:
+                    self.hedge_slots.release()
+                return False
+            excluded.add(state.model_id)
+            attempts.append(state.model_id)
+            if hedge_slot:
+                self.pool.mark_hedge_participation(state)
+            active += 1
+            threading.Thread(
+                target=self._attempt_worker,
+                args=(race, body, state, stream, lane, hedge_slot),
+                name="aliyun-proxy-%s-%s" % (lane, state.model_id),
+                daemon=True,
+            ).start()
+            return True
+
+        if not start_attempt("primary", None):
+            active = 0
+
+        while active > 0:
+            timeout: Optional[float] = None
+            if self.hedging_enabled and not hedge_checked:
+                timeout = max(0.0, hedge_deadline - time.monotonic())
+            try:
+                result = race.results.get(timeout=timeout)
+            except queue.Empty:
+                hedge_checked = True
+                if start_attempt("hedge", 0):
+                    hedge_launched = True
+                    with self.metrics_lock:
+                        self.hedged_requests += 1
+                    self.log.info(
+                        "hedge_started=true delay_seconds=%.1f attempts=%s",
+                        self.hedge_delay_seconds,
+                        ",".join(attempts),
+                    )
+                continue
+
+            active = max(0, active - 1)
+            if result.exclude_low_frequency:
                 excluded.update(
                     candidate.model_id
                     for candidate in self.pool.states
                     if candidate.config.get("rate_class") == "low-frequency"
                 )
-            if mt_language_error:
+            if result.exclude_mt:
                 excluded.update(
                     candidate.model_id
                     for candidate in self.pool.states
                     if candidate.config.get("adapter") == "qwen-mt"
                 )
-            self.log.warning(
-                "model=%s status=%s code=%s cooldown=%.1f fallback=%s message=%s",
-                state.model_id,
-                response.status,
-                code,
-                cooldown,
-                str(retry).lower(),
-                message[:300].replace("\n", " "),
-            )
-            if not retry:
-                return response, None, attempts
 
+            if result.success and result.response is not None:
+                queued = self._resolve_race(race)
+                self.pool.adopt(result.state, result.lane == "hedge")
+                for other in queued:
+                    if other.success:
+                        self._discard_attempt(other)
+                self.log.info(
+                    "selected_model=%s lane=%s hedged=%s attempts=%s elapsed_ms=%.1f",
+                    result.state.model_id,
+                    result.lane,
+                    str(hedge_launched).lower(),
+                    ",".join(attempts),
+                    (time.monotonic() - route_started) * 1000,
+                )
+                return result.response, result.state, attempts
+
+            if result.response is not None:
+                last_response = result.response
+            if not result.retry:
+                queued = self._resolve_race(race)
+                for other in queued:
+                    if other.success:
+                        self._discard_attempt(other)
+                assert result.response is not None
+                return result.response, None, attempts
+
+            wait_seconds = None if active == 0 else 0
+            start_attempt(result.lane, wait_seconds)
+
+        self._resolve_race(race)
         if last_response is not None:
             return last_response, None, attempts
         payload = {
@@ -1130,7 +1387,15 @@ class AliyunProxy:
                 "type": "proxy_error",
             }
         }
-        return UpstreamResponse(429, {"content-type": "application/json"}, json.dumps(payload).encode()), None, attempts
+        return (
+            UpstreamResponse(
+                429,
+                {"content-type": "application/json"},
+                json.dumps(payload).encode(),
+            ),
+            None,
+            attempts,
+        )
 
     def record_client_response(self, status: int, latency_ms: float) -> None:
         with self.metrics_lock:
@@ -1194,6 +1459,14 @@ class AliyunProxy:
         client = self._client_metrics()
         total_model_successes = sum(int(model["successes"]) for model in models)
         total_model_failures = sum(int(model["failures"]) for model in models)
+        total_attempts = total_model_successes + total_model_failures
+        total_adoptions = sum(int(model["adoptions"]) for model in models)
+        total_hedge_wins = sum(int(model["hedge_wins"]) for model in models)
+        total_discarded = sum(
+            int(model["discarded_responses"]) for model in models
+        )
+        with self.metrics_lock:
+            hedged_requests = self.hedged_requests
         return {
             "status": "running",
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1201,12 +1474,33 @@ class AliyunProxy:
             "base_url": "http://%s:%s/v1" % (self.config["host"], self.config["port"]),
             "model_alias": self.alias,
             "upstream_base_url": self.config["upstream_base_url"],
+            "hedging": {
+                "enabled": self.hedging_enabled,
+                "delay_seconds": self.hedge_delay_seconds,
+                "max_concurrent_backups": int(
+                    self.hedging_config.get("max_concurrent_backups", 4)
+                ),
+            },
             "client": client,
             "process": self._process_metrics(),
             "totals": {
                 "model_successes": total_model_successes,
                 "model_failures": total_model_failures,
-                "upstream_attempts": total_model_successes + total_model_failures,
+                "upstream_attempts": total_attempts,
+                "adoptions": total_adoptions,
+                "adoption_rate": round(
+                    total_adoptions / total_attempts * 100, 1
+                )
+                if total_attempts
+                else 0,
+                "hedged_requests": hedged_requests,
+                "hedge_wins": total_hedge_wins,
+                "hedge_win_rate": round(
+                    total_hedge_wins / hedged_requests * 100, 1
+                )
+                if hedged_requests
+                else 0,
+                "discarded_responses": total_discarded,
                 "in_flight": sum(int(model["in_flight"]) for model in models),
                 "requests_last_minute": sum(
                     int(model["requests_last_minute"]) for model in models
@@ -1409,6 +1703,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             stream_failed = False
             try:
                 with response.stream as upstream:
+                    if response.prefetched:
+                        self.wfile.write(response.prefetched)
+                        self.wfile.flush()
                     reader = getattr(upstream, "read1", upstream.read)
                     while True:
                         chunk = reader(8192)
@@ -1427,10 +1724,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
             finally:
                 latency = (time.monotonic() - request_started) * 1000
-                if stream_failed:
-                    self.proxy.pool.failure(state, "stream_error", 0, False)
-                else:
-                    self.proxy.pool.success(state, latency, {})
                 client_status = 502 if stream_failed else 499 if disconnected else response.status
                 self.proxy.record_client_response(client_status, latency)
                 if disconnected:
@@ -1613,10 +1906,24 @@ def status() -> int:
     print("Config: %s" % CONFIG_FILE)
     print("Log: %s" % LOG_FILE)
     if payload:
+        hedging = payload["hedging"]
+        totals = payload["totals"]
+        print(
+            "Hedging: enabled={enabled}, delay={delay_seconds}s, max_backups={max_concurrent_backups}".format(
+                **hedging
+            )
+        )
+        print(
+            "Race: hedged={hedged_requests}, hedge_wins={hedge_wins}, discarded={discarded_responses}, adoptions={adoptions}".format(
+                **totals
+            )
+        )
         for model in payload["models"]:
             print(
-                "- {id}: in_flight={in_flight}, success={successes}, throttles={throttles}, "
-                "cooldown={cooldown_seconds}s, unavailable={unavailable}, avg={average_latency_ms}ms".format(
+                "- {id}: in_flight={in_flight}, success={successes}, adopted={adoptions}, "
+                "adoption_rate={adoption_rate}%, hedge_wins={hedge_wins}, discarded={discarded_responses}, "
+                "throttles={throttles}, cooldown={cooldown_seconds}s, unavailable={unavailable}, "
+                "avg={average_latency_ms}ms".format(
                     **model
                 )
             )

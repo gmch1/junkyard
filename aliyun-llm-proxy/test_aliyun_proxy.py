@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -222,6 +223,152 @@ class ProxyTests(unittest.TestCase):
                 selected = list(executor.map(request_once, (1, 2)))
             self.assertEqual(set(selected), {"model-a", "model-b"})
             self.assertEqual(set(upstream.calls), {"model-a", "model-b"})
+        finally:
+            proxy.close()
+            upstream.close()
+
+    def test_slow_primary_hedges_through_scheduler_and_fastest_wins(self):
+        def respond(body):
+            if body["model"] == "slow-primary":
+                time.sleep(0.25)
+            elif body["model"] == "scheduled-backup":
+                time.sleep(0.02)
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }, {}
+
+        config = make_config("placeholder")
+        config["hedging"] = {
+            "enabled": True,
+            "delay_seconds": 0.05,
+            "max_concurrent_backups": 2,
+        }
+        config["models"] = [
+            {
+                "id": "slow-primary",
+                "enabled": True,
+                "rpm": 600,
+                "routing_priority": 0,
+            },
+            {
+                "id": "lower-priority",
+                "enabled": True,
+                "rpm": 600,
+                "routing_priority": 20,
+            },
+            {
+                "id": "scheduled-backup",
+                "enabled": True,
+                "rpm": 600,
+                "routing_priority": 10,
+            },
+        ]
+        upstream = FakeUpstream(respond)
+        config["upstream_base_url"] = upstream.url
+        proxy = RunningProxy(config)
+        try:
+            started = time.monotonic()
+            with proxy_post(
+                proxy,
+                {"model": "anything", "messages": [{"role": "user", "content": "hello"}]},
+            ) as response:
+                payload = json.load(response)
+                self.assertEqual(payload["model"], "scheduled-backup")
+                self.assertEqual(
+                    response.headers["X-Proxy-Attempts"],
+                    "slow-primary,scheduled-backup",
+                )
+            self.assertLess(time.monotonic() - started, 0.2)
+            time.sleep(0.3)
+
+            metrics = proxy.server.proxy.status()
+            models = {model["id"]: model for model in metrics["models"]}
+            self.assertEqual(upstream.calls, ["slow-primary", "scheduled-backup"])
+            self.assertEqual(models["lower-priority"]["attempts"], 0)
+            self.assertEqual(models["slow-primary"]["discarded_responses"], 1)
+            self.assertEqual(models["slow-primary"]["adoptions"], 0)
+            self.assertEqual(models["scheduled-backup"]["adoptions"], 1)
+            self.assertEqual(models["scheduled-backup"]["hedge_participations"], 1)
+            self.assertEqual(models["scheduled-backup"]["hedge_wins"], 1)
+            self.assertEqual(models["scheduled-backup"]["adoption_rate"], 100.0)
+            self.assertEqual(metrics["totals"]["hedged_requests"], 1)
+            self.assertEqual(metrics["totals"]["hedge_wins"], 1)
+            self.assertEqual(metrics["totals"]["discarded_responses"], 1)
+        finally:
+            proxy.close()
+            upstream.close()
+
+    def test_primary_can_win_after_hedge_starts(self):
+        def respond(body):
+            time.sleep(0.06 if body["model"] == "model-a" else 0.15)
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            }, {}
+
+        config = make_config("placeholder")
+        config["hedging"] = {
+            "enabled": True,
+            "delay_seconds": 0.03,
+            "max_concurrent_backups": 2,
+        }
+        config["models"] = config["models"][:2]
+        upstream = FakeUpstream(respond)
+        config["upstream_base_url"] = upstream.url
+        proxy = RunningProxy(config)
+        try:
+            with proxy_post(
+                proxy,
+                {"model": "anything", "messages": [{"role": "user", "content": "hello"}]},
+            ) as response:
+                self.assertEqual(json.load(response)["model"], "model-a")
+                self.assertEqual(response.headers["X-Proxy-Attempts"], "model-a,model-b")
+            time.sleep(0.2)
+
+            metrics = proxy.server.proxy.status()
+            models = {model["id"]: model for model in metrics["models"]}
+            self.assertEqual(models["model-a"]["adoptions"], 1)
+            self.assertEqual(models["model-b"]["hedge_participations"], 1)
+            self.assertEqual(models["model-b"]["hedge_wins"], 0)
+            self.assertEqual(models["model-b"]["discarded_responses"], 1)
+            self.assertEqual(metrics["totals"]["hedged_requests"], 1)
+            self.assertEqual(metrics["totals"]["hedge_wins"], 0)
+        finally:
+            proxy.close()
+            upstream.close()
+
+    def test_streaming_hedge_selects_first_content_and_preserves_it(self):
+        def respond(body):
+            time.sleep(0.2 if body["model"] == "model-a" else 0.01)
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "streamed"}}],
+            }, {"Content-Type": "application/json"}
+
+        config = make_config("placeholder")
+        config["hedging"] = {
+            "enabled": True,
+            "delay_seconds": 0.03,
+            "max_concurrent_backups": 2,
+        }
+        config["models"] = config["models"][:2]
+        upstream = FakeUpstream(respond)
+        config["upstream_base_url"] = upstream.url
+        proxy = RunningProxy(config)
+        try:
+            with proxy_post(
+                proxy,
+                {
+                    "model": "anything",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            ) as response:
+                payload = json.load(response)
+                self.assertEqual(payload["model"], "model-b")
+                self.assertEqual(response.headers["X-Proxy-Model"], "model-b")
+                self.assertEqual(response.headers["X-Proxy-Attempts"], "model-a,model-b")
         finally:
             proxy.close()
             upstream.close()
@@ -590,6 +737,9 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(metrics["client"]["successes"], 1)
             self.assertGreater(metrics["client"]["average_latency_ms"], 0)
             self.assertEqual(metrics["totals"]["model_successes"], 1)
+            self.assertEqual(metrics["totals"]["adoptions"], 1)
+            self.assertEqual(metrics["totals"]["adoption_rate"], 100.0)
+            self.assertEqual(metrics["totals"]["hedged_requests"], 0)
             self.assertEqual(metrics["totals"]["input_tokens"], 8)
             self.assertIn("rss_mb", metrics["process"])
             self.assertNotIn("upstream-key", json.dumps(metrics))
