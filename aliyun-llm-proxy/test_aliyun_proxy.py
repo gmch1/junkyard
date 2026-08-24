@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -128,6 +129,61 @@ def dashboard_control_post(proxy, model, enabled, include_control_header=True):
 
 
 class ModelPoolTests(unittest.TestCase):
+    def test_runtime_defaults_preserve_loopback_dashboard_behavior(self):
+        config = make_config("http://unused", port=39281)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ALIYUN_PROXY_HOST": "127.0.0.1",
+                "ALIYUN_PROXY_PORT": "39281",
+                "ALIYUN_PROXY_ALLOW_LAN": "0",
+                "ALIYUN_PROXY_DASHBOARD_ENABLED": "1",
+            },
+        ):
+            resolved = aliyun_proxy.runtime_config(config)
+
+        self.assertEqual(resolved["host"], "127.0.0.1")
+        self.assertEqual(resolved["port"], 39281)
+        self.assertFalse(resolved["allow_lan_access"])
+        self.assertTrue(resolved["dashboard_enabled"])
+
+    def test_runtime_lan_binding_requires_explicit_opt_in(self):
+        config = make_config("http://unused", port=39281)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ALIYUN_PROXY_HOST": "0.0.0.0",
+                "ALIYUN_PROXY_ALLOW_LAN": "0",
+            },
+        ):
+            with self.assertRaisesRegex(SystemExit, "ALLOW_LAN"):
+                aliyun_proxy.runtime_config(config)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ALIYUN_PROXY_HOST": "0.0.0.0",
+                "ALIYUN_PROXY_ALLOW_LAN": "1",
+                "ALIYUN_PROXY_DASHBOARD_ENABLED": "1",
+            },
+        ):
+            with self.assertRaisesRegex(SystemExit, "DASHBOARD_ENABLED"):
+                aliyun_proxy.runtime_config(config)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ALIYUN_PROXY_HOST": "0.0.0.0",
+                "ALIYUN_PROXY_ALLOW_LAN": "1",
+                "ALIYUN_PROXY_DASHBOARD_ENABLED": "0",
+            },
+        ):
+            resolved = aliyun_proxy.runtime_config(config)
+
+        self.assertEqual(resolved["host"], "0.0.0.0")
+        self.assertTrue(resolved["allow_lan_access"])
+        self.assertFalse(resolved["dashboard_enabled"])
+
     def test_round_robin_reservation(self):
         pool = aliyun_proxy.ModelPool(make_config("http://unused"))
         chosen = []
@@ -158,7 +214,7 @@ class ModelPoolTests(unittest.TestCase):
         pool.success(state, 1, {})
 
     def test_version_8_migration_adds_models_without_removing_existing_models(self):
-        config = make_config("http://unused")
+        config = make_config("http://unused", port=39281)
         config["version"] = 6
         config["models"] = [
             {"id": "existing-600", "enabled": True, "rpm": 600, "routing_priority": 10},
@@ -844,6 +900,42 @@ class ProxyTests(unittest.TestCase):
                     proxy.url + "/dashboard-assets/%2e%2e/README.md", timeout=5
                 )
             self.assertEqual(raised.exception.code, 404)
+        finally:
+            proxy.close()
+            upstream.close()
+
+    def test_dashboard_can_be_disabled_without_disabling_openai_api(self):
+        upstream = FakeUpstream(
+            lambda body: (
+                200,
+                {
+                    "model": body["model"],
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                },
+                {},
+            )
+        )
+        config = make_config(upstream.url)
+        config["dashboard_enabled"] = False
+        proxy = RunningProxy(config)
+        try:
+            for path in ("/v1", "/dashboard-assets/app.js", "/v1/proxy/dashboard-data"):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(proxy.url + path, timeout=5)
+                self.assertEqual(raised.exception.code, 404)
+
+            request = urllib.request.Request(
+                proxy.url + "/v1/models",
+                headers={"Authorization": "Bearer local-key"},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+
+            with proxy_post(
+                proxy,
+                {"model": "anything", "messages": [{"role": "user", "content": "hello"}]},
+            ) as response:
+                self.assertEqual(response.status, 200)
         finally:
             proxy.close()
             upstream.close()

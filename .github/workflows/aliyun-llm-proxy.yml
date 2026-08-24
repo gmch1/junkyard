@@ -56,3 +56,59 @@ jobs:
         run: |
           python3 -m py_compile aliyun_proxy.py test_aliyun_proxy.py
           python3 -m unittest -v test_aliyun_proxy.py
+
+  macos-app:
+    name: Build universal macOS app
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: aliyun-llm-proxy
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.22.x"
+
+      - name: Test macOS backend
+        run: |
+          cd macos-app/Backend
+          go test -race ./...
+
+      - name: Build universal app
+        run: |
+          chmod +x macos-app/build.sh
+          ./macos-app/build.sh
+
+      - name: Validate app and bundled service
+        run: |
+          app="macos-app/build/AliyunLLMProxy.app"
+          backend="$app/Contents/MacOS/AliyunLLMProxyBackend"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/AliyunLLMProxy"
+          lipo -verify_arch x86_64 arm64 "$backend"
+
+          state_dir="$(mktemp -d /tmp/aliyun-macos-ci.XXXXXX)"
+          export ALIYUN_PROXY_STATE_DIR="$state_dir"
+          export ALIYUN_PROXY_HOST="127.0.0.1"
+          export ALIYUN_PROXY_PORT="39291"
+          printf '%s' 'sk-ci-dummy-upstream-key' | "$backend" set-upstream-key
+          client_key="$("$backend" key)"
+          "$backend" start
+          trap '"$backend" stop >/dev/null 2>&1 || true' EXIT
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:39291/health)" = "200"
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $client_key" http://127.0.0.1:39291/v1/models)" = "200"
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-key' http://127.0.0.1:39291/v1/models)" = "401"
+          "$backend" stop
+          trap - EXIT
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v6
+        with:
+          name: AliyunLLMProxy-macOS-universal
+          path: aliyun-llm-proxy/macos-app/build/AliyunLLMProxy-macOS-universal.zip
+          if-no-files-found: error

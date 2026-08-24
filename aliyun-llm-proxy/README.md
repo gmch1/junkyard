@@ -26,6 +26,14 @@
 - Node.js 22 或更高版本与 pnpm 11；仅构建统计页面时需要
 - 已开通阿里云百炼并拥有 DashScope API Key
 
+## macOS 应用
+
+项目提供原生 macOS 管理应用。Swift AppKit 窗口用于填写 DashScope API Key、启动或停止服务，并展示可复制的 Base URL、客户端 API Key 和模型名称。应用包内置静态 Go 后端，不依赖系统 Python 或 Docker。
+
+macOS 应用默认在 `39281` 端口监听局域网，OpenAI 接口仍要求客户端 Bearer Key；不要把该端口转发到公网。Key 和配置保存到 `~/Library/Application Support/AliyunLLMProxy/`。关闭管理窗口不会停止已经启动的代理。
+
+GitHub Actions 会构建同时支持 Apple Silicon 和 Intel Mac 的 ZIP Artifact。本地构建方法和应用说明见 [`macos-app/README.md`](./macos-app/README.md)。原有 Python CLI、本地 Dashboard 和默认回环监听行为保持不变。
+
 ## 安装
 
 ```bash
@@ -192,3 +200,17 @@ Vite 会把统计接口代理到正在运行的 `127.0.0.1:39281` 服务。
 - 统计页面与统计数据接口不要求 Key，但仅包含计数、延迟、Token 汇总和进程资源信息。
 - 日志不记录请求正文、完整提示词或 API Key；Qwen-MT 只记录目标语言代码与正文字符数。
 - 仓库不会提交 `.aliyun-proxy/`、`*.key`、日志、前端依赖或构建产物。
+
+### 可选的进程环境变量
+
+发行包或服务管理器可以显式覆盖运行位置与监听方式：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `ALIYUN_PROXY_STATE_DIR` | 项目内 `.aliyun-proxy/` | Key、配置、日志和 SQLite 状态目录 |
+| `ALIYUN_PROXY_HOST` | 配置文件中的 `127.0.0.1` | 进程本次运行使用的监听地址 |
+| `ALIYUN_PROXY_PORT` | 配置文件中的 `39281` | 进程本次运行使用的端口 |
+| `ALIYUN_PROXY_ALLOW_LAN` | `false` | 非回环监听的显式安全开关 |
+| `ALIYUN_PROXY_DASHBOARD_ENABLED` | `true` | 是否在业务 HTTP 服务上提供 Dashboard |
+
+这些覆盖只作用于当前进程，不回写 `proxy.json`。非回环地址必须同时设置 `ALIYUN_PROXY_ALLOW_LAN=1` 和 `ALIYUN_PROXY_DASHBOARD_ENABLED=0`，因此单独误设监听地址不会意外开放服务或管理页面。

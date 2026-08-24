@@ -31,7 +31,9 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 
 ROOT = Path(__file__).resolve().parent
-STATE_DIR = ROOT / ".aliyun-proxy"
+STATE_DIR = Path(
+    os.environ.get("ALIYUN_PROXY_STATE_DIR", str(ROOT / ".aliyun-proxy"))
+).expanduser().resolve()
 CONFIG_FILE = STATE_DIR / "proxy.json"
 CLIENT_KEY_FILE = STATE_DIR / "client.key"
 UPSTREAM_KEY_FILE = STATE_DIR / "dashscope.key"
@@ -46,6 +48,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "version": 9,
     "host": "127.0.0.1",
     "port": 39281,
+    "allow_lan_access": False,
+    "dashboard_enabled": True,
     "upstream_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "model_alias": "aliyun-translate-auto",
     "request_timeout_seconds": 120,
@@ -716,14 +720,65 @@ def ensure_config() -> Dict[str, Any]:
     return config
 
 
+def environment_boolean(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise SystemExit("%s must be a boolean value" % name)
+
+
+def runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply opt-in process overrides without changing the persisted config."""
+    resolved = copy.deepcopy(config)
+    if "ALIYUN_PROXY_HOST" in os.environ:
+        resolved["host"] = os.environ["ALIYUN_PROXY_HOST"].strip()
+    if "ALIYUN_PROXY_PORT" in os.environ:
+        try:
+            resolved["port"] = int(os.environ["ALIYUN_PROXY_PORT"].strip())
+        except ValueError as error:
+            raise SystemExit("ALIYUN_PROXY_PORT must be an integer") from error
+    resolved["allow_lan_access"] = environment_boolean(
+        "ALIYUN_PROXY_ALLOW_LAN",
+        bool(resolved.get("allow_lan_access", False)),
+    )
+    resolved["dashboard_enabled"] = environment_boolean(
+        "ALIYUN_PROXY_DASHBOARD_ENABLED",
+        bool(resolved.get("dashboard_enabled", True)),
+    )
+    validate_config(resolved)
+    return resolved
+
+
 def validate_config(config: Dict[str, Any]) -> None:
     required = ("host", "port", "upstream_base_url", "model_alias", "models")
     missing = [key for key in required if key not in config]
     if missing:
         raise SystemExit("Proxy config is missing: %s" % ", ".join(missing))
-    if config["host"] != "127.0.0.1":
-        raise SystemExit("For safety, proxy host must remain 127.0.0.1")
-    if int(config["port"]) == 8080:
+    host = str(config["host"]).strip()
+    if not host:
+        raise SystemExit("Proxy host cannot be empty")
+    if host != "127.0.0.1" and not bool(config.get("allow_lan_access", False)):
+        raise SystemExit(
+            "For safety, non-loopback hosts require allow_lan_access=true "
+            "or ALIYUN_PROXY_ALLOW_LAN=1"
+        )
+    if host != "127.0.0.1" and bool(config.get("dashboard_enabled", True)):
+        raise SystemExit(
+            "For safety, non-loopback hosts require dashboard_enabled=false "
+            "or ALIYUN_PROXY_DASHBOARD_ENABLED=0"
+        )
+    try:
+        port = int(config["port"])
+    except (TypeError, ValueError) as error:
+        raise SystemExit("Proxy port must be an integer") from error
+    if port < 1 or port > 65535:
+        raise SystemExit("Proxy port must be between 1 and 65535")
+    if port == 8080:
         raise SystemExit("Port 8080 is intentionally not supported; choose another port")
     enabled = [model for model in config["models"] if model.get("enabled", True)]
     if not enabled:
@@ -1459,6 +1514,13 @@ class AliyunProxy:
     def authorized(self, authorization: str) -> bool:
         expected = "Bearer " + self.client_key
         return hmac.compare_digest(authorization.strip(), expected)
+
+    @property
+    def dashboard_enabled(self) -> bool:
+        return bool(self.config.get("dashboard_enabled", True))
+
+    def reload_upstream_key(self, upstream_key: str) -> None:
+        self.upstream_key = upstream_key
 
     def _persistent_client_snapshot(self) -> Dict[str, Any]:
         with self.metrics_lock:
@@ -2300,12 +2362,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
             return
         if path in ("/", "/v1", "/dashboard", "/v1/proxy/dashboard"):
+            if not self.proxy.dashboard_enabled:
+                self._send_json(404, {"error": {"code": "not_found", "message": "Endpoint not found."}})
+                return
             self._serve_dashboard()
             return
         if path.startswith("/dashboard-assets/"):
+            if not self.proxy.dashboard_enabled:
+                self._send_json(404, {"error": {"code": "not_found", "message": "Endpoint not found."}})
+                return
             self._serve_dashboard_asset(path)
             return
         if path == "/v1/proxy/dashboard-data":
+            if not self.proxy.dashboard_enabled:
+                self._send_json(404, {"error": {"code": "not_found", "message": "Endpoint not found."}})
+                return
             self._send_json(200, self.proxy.status())
             return
         if not self._require_auth():
@@ -2333,6 +2404,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
         if path == "/v1/proxy/models/enabled":
+            if not self.proxy.dashboard_enabled:
+                self._send_json(404, {"error": {"code": "not_found", "message": "Endpoint not found."}})
+                return
             if not self._require_dashboard_control():
                 return
             try:
@@ -2495,7 +2569,7 @@ def build_server(
 
 
 def serve() -> int:
-    config = ensure_config()
+    config = runtime_config(ensure_config())
     client_key = ensure_client_key()
     upstream_key = read_secret(UPSTREAM_KEY_FILE)
     if not upstream_key:
@@ -2518,8 +2592,20 @@ def serve() -> int:
         logging.getLogger("aliyun-proxy").info("received_signal=%s stopping=true", signum)
         threading.Thread(target=server.shutdown, daemon=True).start()
 
+    def request_reload(_signum: int, _frame: Any) -> None:
+        refreshed = read_secret(UPSTREAM_KEY_FILE)
+        if not refreshed:
+            logging.getLogger("aliyun-proxy").error(
+                "upstream_key_reload=false reason=empty_key"
+            )
+            return
+        server.proxy.reload_upstream_key(refreshed)
+        logging.getLogger("aliyun-proxy").info("upstream_key_reload=true")
+
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, request_reload)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
@@ -2528,8 +2614,15 @@ def serve() -> int:
     return 0
 
 
+def local_connect_host(config: Dict[str, Any]) -> str:
+    host = str(config["host"])
+    return "127.0.0.1" if host == "0.0.0.0" else host
+
+
 def local_health(config: Dict[str, Any], timeout: float = 1.0) -> bool:
-    request = urllib.request.Request("http://%s:%s/health" % (config["host"], config["port"]))
+    request = urllib.request.Request(
+        "http://%s:%s/health" % (local_connect_host(config), config["port"])
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status == 200
@@ -2538,7 +2631,7 @@ def local_health(config: Dict[str, Any], timeout: float = 1.0) -> bool:
 
 
 def start() -> int:
-    config = ensure_config()
+    config = runtime_config(ensure_config())
     ensure_client_key()
     if not read_secret(UPSTREAM_KEY_FILE):
         sys.stderr.write("Aliyun API key is not configured.\n")
@@ -2617,7 +2710,7 @@ def stop() -> int:
 
 def fetch_status(config: Dict[str, Any], client_key: str) -> Optional[Dict[str, Any]]:
     request = urllib.request.Request(
-        "http://%s:%s/v1/proxy/status" % (config["host"], config["port"]),
+        "http://%s:%s/v1/proxy/status" % (local_connect_host(config), config["port"]),
         headers={"Authorization": "Bearer " + client_key},
     )
     try:
@@ -2628,7 +2721,7 @@ def fetch_status(config: Dict[str, Any], client_key: str) -> Optional[Dict[str, 
 
 
 def status() -> int:
-    config = ensure_config()
+    config = runtime_config(ensure_config())
     client_key = ensure_client_key()
     pid = read_pid()
     running = is_proxy_process(pid)
@@ -2713,8 +2806,22 @@ def reset_unavailable(model_id: Optional[str]) -> int:
     return 0
 
 
+def reload_upstream_key_process() -> int:
+    pid = read_pid()
+    if not is_proxy_process(pid):
+        sys.stderr.write("Aliyun proxy is not running. The new key will be used on next start.\n")
+        return 1
+    if not hasattr(signal, "SIGHUP"):
+        sys.stderr.write("Reloading the upstream key is not supported on this platform.\n")
+        return 1
+    assert pid is not None
+    os.kill(pid, signal.SIGHUP)
+    print("Aliyun API key reload requested (PID %s)." % pid)
+    return 0
+
+
 def probe() -> int:
-    config = ensure_config()
+    config = runtime_config(ensure_config())
     payload = {
         "model": config["model_alias"],
         "messages": [
@@ -2732,7 +2839,7 @@ def probe() -> int:
         "stream": False,
     }
     request = urllib.request.Request(
-        "http://%s:%s/v1/chat/completions" % (config["host"], config["port"]),
+        "http://%s:%s/v1/chat/completions" % (local_connect_host(config), config["port"]),
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
         headers={
@@ -2769,6 +2876,7 @@ def main() -> int:
         "config",
         "serve",
         "unavailable",
+        "reload-key",
         "probe",
     ):
         subparsers.add_parser(command)
@@ -2795,6 +2903,8 @@ def main() -> int:
         return show_unavailable()
     if args.command == "reset-unavailable":
         return reset_unavailable(args.model)
+    if args.command == "reload-key":
+        return reload_upstream_key_process()
     if args.command == "probe":
         return probe()
     if args.command == "key":
