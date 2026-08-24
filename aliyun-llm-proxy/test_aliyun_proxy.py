@@ -76,12 +76,18 @@ class FakeUpstream:
 
 
 class RunningProxy:
-    def __init__(self, config, metrics_file=None, config_file=None):
+    def __init__(
+        self,
+        config,
+        metrics_file=None,
+        config_file=None,
+        unavailable_file=None,
+    ):
         self.server = aliyun_proxy.build_server(
             config,
             "local-key",
             "upstream-key",
-            unavailable_file=None,
+            unavailable_file=unavailable_file,
             metrics_file=metrics_file,
             config_file=config_file,
         )
@@ -967,6 +973,84 @@ class ProxyTests(unittest.TestCase):
         finally:
             proxy.close()
             upstream.close()
+
+    def test_unavailable_model_probe_failure_keeps_state_unchanged(self):
+        def respond(_body):
+            return 403, {
+                "error": {
+                    "code": "AllocationQuota.FreeTierOnly",
+                    "message": "Free tier of the model has been exhausted",
+                }
+            }, {}
+
+        upstream = FakeUpstream(respond)
+        with tempfile.TemporaryDirectory() as directory:
+            unavailable_file = Path(directory) / "unavailable.json"
+            store = aliyun_proxy.UnavailableStore(unavailable_file)
+            store.mark(
+                "model-a",
+                403,
+                "AllocationQuota.FreeTierOnly",
+                "Free tier of the model has been exhausted",
+            )
+            proxy = RunningProxy(
+                make_config(upstream.url),
+                unavailable_file=unavailable_file,
+            )
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    dashboard_control_post(proxy, "model-a", True)
+                self.assertEqual(raised.exception.code, 409)
+                payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(payload["error"]["code"], "model_probe_failed")
+                model_a = next(
+                    model for model in payload["dashboard"]["models"] if model["id"] == "model-a"
+                )
+                self.assertTrue(model_a["enabled"])
+                self.assertTrue(model_a["unavailable"])
+                self.assertEqual(model_a["attempts"], 0)
+                self.assertIn("model-a", aliyun_proxy.UnavailableStore(unavailable_file).snapshot())
+                self.assertEqual(upstream.calls, ["model-a"])
+            finally:
+                proxy.close()
+        upstream.close()
+
+    def test_unavailable_model_probe_success_enables_model(self):
+        def respond(body):
+            return 200, {
+                "model": body["model"],
+                "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+            }, {}
+
+        upstream = FakeUpstream(respond)
+        with tempfile.TemporaryDirectory() as directory:
+            unavailable_file = Path(directory) / "unavailable.json"
+            store = aliyun_proxy.UnavailableStore(unavailable_file)
+            store.mark(
+                "model-a",
+                403,
+                "AllocationQuota.FreeTierOnly",
+                "Free tier of the model has been exhausted",
+            )
+            proxy = RunningProxy(
+                make_config(upstream.url),
+                unavailable_file=unavailable_file,
+            )
+            try:
+                with dashboard_control_post(proxy, "model-a", True) as response:
+                    payload = json.load(response)
+                self.assertTrue(payload["probed"])
+                model_a = next(
+                    model for model in payload["dashboard"]["models"] if model["id"] == "model-a"
+                )
+                self.assertTrue(model_a["enabled"])
+                self.assertFalse(model_a["unavailable"])
+                self.assertEqual(model_a["attempts"], 0)
+                self.assertNotIn("model-a", aliyun_proxy.UnavailableStore(unavailable_file).snapshot())
+                self.assertEqual(upstream.calls, ["model-a"])
+            finally:
+                proxy.close()
+        upstream.close()
 
 
 if __name__ == "__main__":

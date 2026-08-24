@@ -549,6 +549,16 @@ class QwenMTUnsupportedLanguage(ValueError):
         super().__init__(raw_target)
 
 
+class ModelProbeError(RuntimeError):
+    def __init__(self, status: int, code: str, message: str) -> None:
+        self.status = status
+        self.code = code
+        self.message = message
+        label = code or ("HTTP %s" % status if status else "connection_error")
+        detail = message.strip()[:300]
+        super().__init__("%s%s" % (label, ": " + detail if detail else ""))
+
+
 def ensure_state_dir() -> None:
     STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(str(STATE_DIR), 0o700)
@@ -1195,6 +1205,13 @@ class ModelPool:
                 return True
         return False
 
+    def unavailable_status(self, model_id: str) -> Optional[bool]:
+        with self.lock:
+            for state in self.states:
+                if state.model_id == model_id:
+                    return state.unavailable
+        return None
+
     def persistent_snapshot(self) -> List[Dict[str, Any]]:
         with self.lock:
             return [
@@ -1600,7 +1617,13 @@ class AliyunProxy:
         payload["model"] = state.model_id
         return payload
 
-    def upstream_request(self, body: Dict[str, Any], state: ModelState, stream: bool) -> UpstreamResponse:
+    def upstream_request(
+        self,
+        body: Dict[str, Any],
+        state: ModelState,
+        stream: bool,
+        timeout_seconds: Optional[float] = None,
+    ) -> UpstreamResponse:
         payload = self._upstream_payload(body, state)
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         base = str(self.config["upstream_base_url"]).rstrip("/")
@@ -1619,7 +1642,11 @@ class AliyunProxy:
         try:
             response = urllib.request.urlopen(
                 request,
-                timeout=float(self.config.get("request_timeout_seconds", 120)),
+                timeout=(
+                    float(self.config.get("request_timeout_seconds", 120))
+                    if timeout_seconds is None
+                    else timeout_seconds
+                ),
             )
             headers = {key.lower(): value for key, value in response.headers.items()}
             if stream:
@@ -1641,6 +1668,73 @@ class AliyunProxy:
         except urllib.error.HTTPError as error:
             headers = {key.lower(): value for key, value in error.headers.items()}
             return UpstreamResponse(error.code, headers, error.read())
+
+    def probe_model(self, model_id: str) -> None:
+        with self.config_lock:
+            model = next(
+                (
+                    copy.deepcopy(candidate)
+                    for candidate in self.config.get("models", [])
+                    if str(candidate.get("id")) == model_id
+                ),
+                None,
+            )
+        if model is None:
+            raise KeyError(model_id)
+        state = ModelState(model)
+        body = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": "Translate to Chinese: Hello"}],
+            "temperature": 0,
+            "max_tokens": 8,
+            "stream": False,
+        }
+        started = time.monotonic()
+        try:
+            response = self.upstream_request(
+                body,
+                state,
+                False,
+                float(self.config.get("model_probe_timeout_seconds", 15)),
+            )
+        except (OSError, urllib.error.URLError) as error:
+            latency = (time.monotonic() - started) * 1000
+            self.log.warning(
+                "model=%s manual_probe=true transport_error=%s latency_ms=%.1f state_changed=false",
+                model_id,
+                type(error).__name__,
+                latency,
+            )
+            raise ModelProbeError(0, type(error).__name__, str(error)) from error
+        latency = (time.monotonic() - started) * 1000
+        if 200 <= response.status < 300:
+            self.log.info(
+                "model=%s manual_probe=true status=%s latency_ms=%.1f available=true",
+                model_id,
+                response.status,
+                latency,
+            )
+            return
+        code, message = parse_error(response.body)
+        self.log.warning(
+            "model=%s manual_probe=true status=%s code=%s latency_ms=%.1f state_changed=false message=%s",
+            model_id,
+            response.status,
+            code,
+            latency,
+            message[:300].replace("\n", " "),
+        )
+        raise ModelProbeError(response.status, code, message)
+
+    def update_model_enabled(self, model_id: str, enabled: bool) -> bool:
+        unavailable = self.pool.unavailable_status(model_id)
+        if unavailable is None:
+            raise KeyError(model_id)
+        probed = bool(enabled and unavailable)
+        if probed:
+            self.probe_model(model_id)
+        self.set_model_enabled(model_id, enabled)
+        return probed
 
     def _perform_attempt(
         self,
@@ -2262,16 +2356,35 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                self.proxy.set_model_enabled(model_id, enabled)
+                probed = self.proxy.update_model_enabled(model_id, enabled)
             except KeyError:
                 self._send_json(404, {"error": {"code": "model_not_found", "message": "Model not found."}})
+                return
+            except ModelProbeError as error:
+                self._send_json(
+                    409,
+                    {
+                        "error": {
+                            "code": "model_probe_failed",
+                            "message": str(error),
+                            "upstream_status": error.status,
+                            "upstream_code": error.code,
+                        },
+                        "dashboard": self.proxy.status(),
+                    },
+                )
                 return
             except ValueError as error:
                 self._send_json(409, {"error": {"code": "last_enabled_model", "message": str(error)}})
                 return
             self._send_json(
                 200,
-                {"model": model_id, "enabled": enabled, "dashboard": self.proxy.status()},
+                {
+                    "model": model_id,
+                    "enabled": enabled,
+                    "probed": probed,
+                    "dashboard": self.proxy.status(),
+                },
             )
             return
         if path != "/v1/chat/completions":

@@ -18,6 +18,7 @@ import {
   Title,
 } from '@mantine/core'
 import { useDocumentTitle } from '@mantine/hooks'
+import { notifications } from '@mantine/notifications'
 import {
   IconActivity,
   IconAlertCircle,
@@ -185,11 +186,7 @@ function ModelsTable({ models, pendingModel, onToggle }: ModelsTableProps) {
             const state = modelState(model)
             const reason = model.unavailable_reason || model.cooldown_reason
             const nextEnabled = !model.enabled || model.unavailable
-            const actionLabel = model.unavailable
-              ? '重试启用'
-              : model.enabled
-                ? '禁用'
-                : '启用'
+            const actionLabel = model.enabled && !model.unavailable ? '禁用' : '启用'
             return (
               <Table.Tr key={model.id}>
                 <Table.Td>
@@ -249,7 +246,6 @@ function App() {
   useDocumentTitle('阿里云模型代理 · 运行统计')
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState('')
-  const [actionError, setActionError] = useState('')
   const [pendingModel, setPendingModel] = useState('')
 
   useEffect(() => {
@@ -304,15 +300,30 @@ function App() {
       })
       const payload = await response.json() as {
         dashboard?: DashboardData
-        error?: { message?: string }
+        probed?: boolean
+        error?: { message?: string; upstream_code?: string }
       }
       if (!response.ok || !payload.dashboard) {
-        throw new Error(payload.error?.message || `HTTP ${response.status}`)
+        if (payload.dashboard) setData(payload.dashboard)
+        const message = payload.error?.upstream_code?.includes('AllocationQuota')
+          ? '模型额度仍未恢复，当前状态保持不变。'
+          : payload.error?.message || `HTTP ${response.status}`
+        throw new Error(message)
       }
       setData(payload.dashboard)
-      setActionError('')
+      notifications.show({
+        title: enabled ? '模型已启用' : '模型已禁用',
+        message: payload.probed
+          ? `${modelId} 检测通过，已恢复调度。`
+          : `${modelId} 已更新。`,
+        color: enabled ? 'teal' : 'orange',
+      })
     } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : '模型状态更新失败')
+      notifications.show({
+        title: enabled ? '模型检测失败' : '模型状态更新失败',
+        message: caught instanceof Error ? caught.message : '未知错误',
+        color: 'red',
+      })
     } finally {
       setPendingModel('')
     }
@@ -343,12 +354,6 @@ function App() {
           {error && (
             <Alert icon={<IconAlertCircle size={18} />} color="red" title="暂时无法读取统计数据">
               {error}；页面会自动重试。
-            </Alert>
-          )}
-
-          {actionError && (
-            <Alert icon={<IconAlertCircle size={18} />} color="red" title="模型状态更新失败" withCloseButton onClose={() => setActionError('')}>
-              {actionError}
             </Alert>
           )}
 
