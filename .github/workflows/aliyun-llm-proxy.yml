@@ -43,6 +43,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.22.x"
+          cache-dependency-path: aliyun-llm-proxy/go.sum
 
       - name: Install dashboard dependencies
         run: pnpm --dir dashboard install --frozen-lockfile
@@ -74,6 +75,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.22.x"
+          cache-dependency-path: aliyun-llm-proxy/go.sum
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
