@@ -212,9 +212,12 @@ func TestSlowPrimaryLaunchesHedgeAndFastestWins(t *testing.T) {
 	if response.Status != 200 || state == nil || state.Config.ID != "fast" || strings.Join(attempts, ",") != "slow,fast" {
 		t.Fatalf("status=%d state=%#v attempts=%v", response.Status, state, attempts)
 	}
-	time.Sleep(200 * time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for proxy.pool.snapshot()[0].InFlight != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	snapshots := proxy.pool.snapshot()
-	if snapshots[1].HedgeWins != 1 || snapshots[0].DiscardedResponses != 1 {
+	if snapshots[1].HedgeWins != 1 || snapshots[0].InFlight != 0 || snapshots[0].Successes != 0 || snapshots[0].Failures != 0 || snapshots[0].CooldownSeconds != 0 {
 		t.Fatalf("hedge metrics = %#v", snapshots)
 	}
 }

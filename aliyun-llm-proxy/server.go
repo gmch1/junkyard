@@ -170,6 +170,19 @@ func decodeBody(w http.ResponseWriter, r *http.Request, limit int64, target any)
 	return nil
 }
 
+func classifyStreamReadError(requestErr, readErr error) (failed, disconnected bool) {
+	if readErr == nil {
+		return false, false
+	}
+	if requestErr != nil {
+		return false, true
+	}
+	if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, net.ErrClosed) {
+		return true, false
+	}
+	return false, false
+}
+
 func (s *apiServer) handleDashboard(w http.ResponseWriter, r *http.Request, requestPath string) bool {
 	isPage := requestPath == "/" || requestPath == "/v1" || requestPath == "/dashboard" || requestPath == "/v1/proxy/dashboard"
 	isAsset := strings.HasPrefix(requestPath, "/dashboard-assets/")
@@ -293,7 +306,7 @@ func (s *apiServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	stream, _ := body["stream"].(bool)
-	response, state, attempts := s.proxy.route(body, stream)
+	response, state, attempts := s.proxy.routeContext(r.Context(), body, stream)
 	w.Header().Set("X-Proxy-Attempts", strings.Join(attempts, ","))
 	if state != nil {
 		w.Header().Set("X-Proxy-Model", state.Config.ID)
@@ -329,9 +342,9 @@ func (s *apiServer) handleChat(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if readErr != nil {
-					if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, net.ErrClosed) {
-						failed = true
-					}
+					readFailed, readDisconnected := classifyStreamReadError(r.Context().Err(), readErr)
+					failed = failed || readFailed
+					disconnected = disconnected || readDisconnected
 					break
 				}
 			}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math"
 	"math/rand"
 	"sort"
@@ -138,6 +139,7 @@ type acquireOptions struct {
 	ExcludeLowFrequency      bool
 	ExcludeMT                bool
 	Wait                     time.Duration
+	Context                  context.Context
 }
 
 func (p *modelPool) acquire(options acquireOptions) *modelState {
@@ -146,7 +148,14 @@ func (p *modelPool) acquire(options acquireOptions) *modelState {
 		wait = p.routeWait
 	}
 	deadline := time.Now().Add(wait)
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
 		now := time.Now()
 		p.mu.Lock()
 		type candidate struct {
@@ -203,7 +212,13 @@ func (p *modelPool) acquire(options acquireOptions) *modelState {
 		if !now.Before(deadline) {
 			return nil
 		}
-		time.Sleep(25 * time.Millisecond)
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
 	}
 }
 
@@ -245,6 +260,12 @@ func (p *modelPool) failure(state *modelState, reason string, cooldown time.Dura
 			state.CooldownReason = reason
 		}
 	}
+}
+
+func (p *modelPool) abandon(state *modelState) {
+	p.mu.Lock()
+	state.InFlight = max(0, state.InFlight-1)
+	p.mu.Unlock()
 }
 
 func (p *modelPool) markHedgeParticipation(state *modelState) {

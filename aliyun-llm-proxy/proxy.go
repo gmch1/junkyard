@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,6 +35,40 @@ type upstreamResponse struct {
 	Prefetched []byte
 }
 
+type idleTimeoutReadCloser struct {
+	io.ReadCloser
+	timeout time.Duration
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.once.Do(r.cancel)
+	return err
+}
+
+func (r *idleTimeoutReadCloser) Read(buffer []byte) (int, error) {
+	if r.timeout <= 0 {
+		return r.ReadCloser.Read(buffer)
+	}
+	timedOut := make(chan struct{})
+	timer := time.AfterFunc(r.timeout, func() {
+		_ = r.ReadCloser.Close()
+		close(timedOut)
+	})
+	count, err := r.ReadCloser.Read(buffer)
+	if !timer.Stop() {
+		<-timedOut
+		return count, context.DeadlineExceeded
+	}
+	return count, err
+}
+
 type attemptResult struct {
 	State               *modelState
 	Lane                string
@@ -42,6 +77,7 @@ type attemptResult struct {
 	Retry               bool
 	ExcludeLowFrequency bool
 	ExcludeMT           bool
+	Canceled            bool
 }
 
 type routeRace struct {
@@ -81,9 +117,14 @@ func newProxy(cfg config, clientKey, upstreamKey string, unavailable *unavailabl
 	transport.MaxIdleConns = 100
 	transport.MaxIdleConnsPerHost = 32
 	transport.IdleConnTimeout = 90 * time.Second
+	requestTimeout := time.Duration(cfg.RequestTimeoutSeconds * float64(time.Second))
+	dialTimeout := min(30*time.Second, requestTimeout)
+	transport.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = min(10*time.Second, requestTimeout)
+	transport.ResponseHeaderTimeout = requestTimeout
 	p := &proxy{
 		cfg: cfg, clientKey: clientKey, upstreamKey: upstreamKey, unavailable: unavailable, metrics: metrics,
-		client: &http.Client{Transport: transport, Timeout: time.Duration(cfg.RequestTimeoutSeconds * float64(time.Second))},
+		client: &http.Client{Transport: transport},
 		pool:   newModelPool(cfg, unavailable.snapshot(), persistedModels), startedAt: time.Now(), clientMetrics: clientMetrics,
 		hedgeSlots: make(chan struct{}, cfg.Hedging.MaxConcurrentBackups), stopMetrics: make(chan struct{}), metricsDone: make(chan struct{}),
 	}
@@ -193,7 +234,7 @@ func usageFromBody(body []byte) (uint64, uint64) {
 	return payload.Usage.Prompt, payload.Usage.Completion
 }
 
-func (p *proxy) upstreamRequest(body map[string]any, state *modelState, stream bool, timeout time.Duration) (*upstreamResponse, error) {
+func (p *proxy) upstreamRequestContext(parent context.Context, body map[string]any, state *modelState, stream bool, timeout time.Duration) (*upstreamResponse, error) {
 	payload, err := upstreamPayload(body, state)
 	if err != nil {
 		return nil, err
@@ -202,10 +243,17 @@ func (p *proxy) upstreamRequest(body map[string]any, state *modelState, stream b
 	if err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
-	if timeout > 0 {
+	if parent == nil {
+		parent = context.Background()
+	}
+	requestTimeout := timeout
+	if requestTimeout <= 0 && !stream {
+		requestTimeout = time.Duration(p.cfg.RequestTimeoutSeconds * float64(time.Second))
+	}
+	ctx := parent
+	if requestTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
+		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 		defer cancel()
 	}
 	url := strings.TrimRight(p.cfg.UpstreamBaseURL, "/") + "/chat/completions"
@@ -231,13 +279,14 @@ func (p *proxy) upstreamRequest(body map[string]any, state *modelState, stream b
 	}
 	headers := response.Header.Clone()
 	if response.StatusCode >= 200 && response.StatusCode < 300 && stream {
+		streamBody := &idleTimeoutReadCloser{ReadCloser: response.Body, timeout: time.Duration(p.cfg.RequestTimeoutSeconds * float64(time.Second))}
 		buffer := make([]byte, 8192)
-		count, readErr := response.Body.Read(buffer)
+		count, readErr := streamBody.Read(buffer)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			response.Body.Close()
+			streamBody.Close()
 			return nil, readErr
 		}
-		return &upstreamResponse{Status: response.StatusCode, Headers: headers, Stream: response.Body, Prefetched: append([]byte(nil), buffer[:count]...)}, nil
+		return &upstreamResponse{Status: response.StatusCode, Headers: headers, Stream: streamBody, Prefetched: append([]byte(nil), buffer[:count]...)}, nil
 	}
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, maxRequestSize))
 	response.Body.Close()
@@ -247,11 +296,19 @@ func (p *proxy) upstreamRequest(body map[string]any, state *modelState, stream b
 	return &upstreamResponse{Status: response.StatusCode, Headers: headers, Body: data}, nil
 }
 
-func (p *proxy) performAttempt(body map[string]any, state *modelState, stream bool, lane string) attemptResult {
+func (p *proxy) upstreamRequest(body map[string]any, state *modelState, stream bool, timeout time.Duration) (*upstreamResponse, error) {
+	return p.upstreamRequestContext(context.Background(), body, state, stream, timeout)
+}
+
+func (p *proxy) performAttemptContext(ctx context.Context, body map[string]any, state *modelState, stream bool, lane string) attemptResult {
 	started := time.Now()
-	response, err := p.upstreamRequest(body, state, stream, 0)
+	response, err := p.upstreamRequestContext(ctx, body, state, stream, 0)
 	latency := float64(time.Since(started).Microseconds()) / 1000
 	if err != nil {
+		if ctx.Err() != nil {
+			p.pool.abandon(state)
+			return attemptResult{State: state, Lane: lane, Canceled: true}
+		}
 		var unsupported qwenMTUnsupportedLanguage
 		if errors.As(err, &unsupported) {
 			p.pool.failure(state, "unsupported_target_language", 0, false)
@@ -319,8 +376,8 @@ func (p *proxy) publishAttempt(race *routeRace, result attemptResult) {
 	}
 }
 
-func (p *proxy) attemptWorker(race *routeRace, body map[string]any, state *modelState, stream bool, lane string, hedgeSlot bool) {
-	result := p.performAttempt(body, state, stream, lane)
+func (p *proxy) attemptWorker(ctx context.Context, race *routeRace, body map[string]any, state *modelState, stream bool, lane string, hedgeSlot bool) {
+	result := p.performAttemptContext(ctx, body, state, stream, lane)
 	if hedgeSlot {
 		<-p.hedgeSlots
 	}
@@ -342,9 +399,13 @@ func (p *proxy) resolveRace(race *routeRace) []attemptResult {
 	}
 }
 
-func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *modelState, []string) {
+func (p *proxy) routeContext(ctx context.Context, body map[string]any, stream bool) (*upstreamResponse, *modelState, []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	race := &routeRace{results: make(chan attemptResult, len(p.pool.states)+2)}
 	excluded := map[string]bool{}
+	attemptCancels := map[string]context.CancelFunc{}
 	attempts := []string{}
 	var last *upstreamResponse
 	active := 0
@@ -352,7 +413,33 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 	excludeLow, excludeMT := false, false
 	started := time.Now()
 	hedgeDeadline := started.Add(time.Duration(p.cfg.Hedging.DelaySeconds * float64(time.Second)))
+	cancelAttempt := func(state *modelState) {
+		if state == nil {
+			return
+		}
+		if cancel, exists := attemptCancels[state.Config.ID]; exists {
+			cancel()
+			delete(attemptCancels, state.Config.ID)
+		}
+	}
+	takeAttemptCancel := func(state *modelState) context.CancelFunc {
+		if state == nil {
+			return nil
+		}
+		cancel := attemptCancels[state.Config.ID]
+		delete(attemptCancels, state.Config.ID)
+		return cancel
+	}
+	cancelAllAttempts := func() {
+		for modelID, cancel := range attemptCancels {
+			cancel()
+			delete(attemptCancels, modelID)
+		}
+	}
 	startAttempt := func(lane string, wait time.Duration) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		hedge := lane == "hedge"
 		if hedge {
 			select {
@@ -361,7 +448,7 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 				return false
 			}
 		}
-		state := p.pool.acquire(acquireOptions{Excluded: excluded, RequireIncrementalStream: stream, ExcludeLowFrequency: excludeLow, ExcludeMT: excludeMT, Wait: wait})
+		state := p.pool.acquire(acquireOptions{Excluded: excluded, RequireIncrementalStream: stream, ExcludeLowFrequency: excludeLow, ExcludeMT: excludeMT, Wait: wait, Context: ctx})
 		if state == nil {
 			if hedge {
 				<-p.hedgeSlots
@@ -373,8 +460,10 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 		if hedge {
 			p.pool.markHedgeParticipation(state)
 		}
+		attemptCtx, cancel := context.WithCancel(ctx)
+		attemptCancels[state.Config.ID] = cancel
 		active++
-		go p.attemptWorker(race, body, state, stream, lane, hedge)
+		go p.attemptWorker(attemptCtx, race, body, state, stream, lane, hedge)
 		return true
 	}
 	startAttempt("primary", -1)
@@ -409,6 +498,24 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 			result = <-race.results
 		}
 		active = max(0, active-1)
+		if result.Canceled || ctx.Err() != nil {
+			cancelAttempt(result.State)
+			cancelAllAttempts()
+			queued := p.resolveRace(race)
+			if result.Success {
+				p.discardAttempt(result)
+			}
+			for _, other := range queued {
+				if other.Success {
+					p.discardAttempt(other)
+				}
+			}
+			bodyBytes, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "client_closed_request", "message": "The client canceled the request.", "type": "proxy_error"}})
+			return &upstreamResponse{Status: 499, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: bodyBytes}, nil, attempts
+		}
+		if !result.Success || !stream || result.Response == nil || result.Response.Stream == nil {
+			cancelAttempt(result.State)
+		}
 		if result.ExcludeLowFrequency {
 			excludeLow = true
 		}
@@ -417,6 +524,12 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 		}
 		if result.Success && result.Response != nil {
 			queued := p.resolveRace(race)
+			if result.Response.Stream != nil {
+				if cancel := takeAttemptCancel(result.State); cancel != nil {
+					result.Response.Stream = &cancelOnCloseReadCloser{ReadCloser: result.Response.Stream, cancel: cancel}
+				}
+			}
+			cancelAllAttempts()
 			p.pool.adopt(result.State, result.Lane == "hedge")
 			for _, other := range queued {
 				if other.Success {
@@ -430,6 +543,7 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 			last = result.Response
 		}
 		if !result.Retry {
+			cancelAllAttempts()
 			queued := p.resolveRace(race)
 			for _, other := range queued {
 				if other.Success {
@@ -445,11 +559,20 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 		startAttempt(result.Lane, wait)
 	}
 	p.resolveRace(race)
+	cancelAllAttempts()
+	if ctx.Err() != nil {
+		bodyBytes, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "client_closed_request", "message": "The client canceled the request.", "type": "proxy_error"}})
+		return &upstreamResponse{Status: 499, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: bodyBytes}, nil, attempts
+	}
 	if last != nil {
 		return last, nil, attempts
 	}
 	bodyBytes, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "proxy_model_pool_exhausted", "message": "All translation models are rate-limited, cooling down, or locally saturated.", "type": "proxy_error"}})
 	return &upstreamResponse{Status: 429, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: bodyBytes}, nil, attempts
+}
+
+func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *modelState, []string) {
+	return p.routeContext(context.Background(), body, stream)
 }
 
 func (p *proxy) recordClientResponse(status int, latencyMS float64) {
