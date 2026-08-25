@@ -32,6 +32,7 @@ private final class BackendController {
         values["ALIYUN_PROXY_HOST"] = "0.0.0.0"
         values["ALIYUN_PROXY_PORT"] = String(servicePort)
         values["ALIYUN_PROXY_ALLOW_LAN"] = "1"
+        values["ALIYUN_PROXY_DASHBOARD_ENABLED"] = "1"
         return values
     }
 

@@ -389,7 +389,10 @@ func (p *proxy) route(body map[string]any, stream bool) (*upstreamResponse, *mod
 			select {
 			case result = <-race.results:
 				if !timer.Stop() {
-					<-timer.C
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
 			case <-timer.C:
 				hedgeChecked = true

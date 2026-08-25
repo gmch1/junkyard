@@ -57,6 +57,9 @@ func (e qwenMTUnsupportedLanguage) Error() string {
 }
 
 func messageText(content any) string {
+	if content == nil {
+		return ""
+	}
 	if text, ok := content.(string); ok {
 		return text
 	}

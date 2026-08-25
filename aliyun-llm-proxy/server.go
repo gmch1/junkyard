@@ -100,7 +100,7 @@ func (s *apiServer) baseURL() string {
 	if host == "0.0.0.0" || host == "::" {
 		host = localIPv4Address()
 	}
-	return fmt.Sprintf("http://%s:%d/v1", host, s.proxy.cfg.Port)
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(s.proxy.cfg.Port)) + "/v1"
 }
 
 func (s *apiServer) serveAsset(w http.ResponseWriter, name string, index bool) {

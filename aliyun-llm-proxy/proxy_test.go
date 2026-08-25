@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,6 +103,31 @@ func TestConfigMigrationAddsNewModelsWithoutDroppingOverrides(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("new default models were not appended")
+	}
+}
+
+func TestLocalServiceReadinessDoesNotRequireDisabledDashboard(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+	cfg := testConfig("https://example.invalid", testModel("one"))
+	cfg.Port = listener.Addr().(*net.TCPAddr).Port
+	cfg.DashboardEnabled = false
+	if !localServiceReady(cfg) {
+		t.Fatal("healthy service with disabled dashboard was considered unavailable")
+	}
+	if got := localURL(config{Host: "::1", Port: 39281}, "/health"); got != "http://[::1]:39281/health" {
+		t.Fatalf("IPv6 URL = %q", got)
 	}
 }
 

@@ -77,7 +77,7 @@ func localConnectHost(cfg config) string {
 	return cfg.Host
 }
 func localURL(cfg config, path string) string {
-	return fmt.Sprintf("http://%s:%d%s", localConnectHost(cfg), cfg.Port, path)
+	return "http://" + net.JoinHostPort(localConnectHost(cfg), strconv.Itoa(cfg.Port)) + path
 }
 
 func localHealth(cfg config) bool {
@@ -98,6 +98,10 @@ func localDashboardHealth(cfg config) bool {
 	}
 	response.Body.Close()
 	return response.StatusCode == http.StatusOK
+}
+
+func localServiceReady(cfg config) bool {
+	return localHealth(cfg) && (!cfg.DashboardEnabled || localDashboardHealth(cfg))
 }
 
 func serve() error {
@@ -204,7 +208,7 @@ func start() error {
 		return err
 	}
 	pid := processPID()
-	if sameProxyProcess(pid) && localHealth(cfg) && localDashboardHealth(cfg) {
+	if sameProxyProcess(pid) && localServiceReady(cfg) {
 		fmt.Printf("Aliyun proxy is already running (PID %d).\n", pid)
 		return nil
 	}
@@ -235,7 +239,7 @@ func start() error {
 	}
 	logFile.Close()
 	for attempt := 0; attempt < 100; attempt++ {
-		if localHealth(cfg) && localDashboardHealth(cfg) {
+		if localServiceReady(cfg) {
 			fmt.Printf("Aliyun proxy started (PID %d).\n", command.Process.Pid)
 			fmt.Printf("Dashboard: %s\n", localURL(cfg, "/"))
 			fmt.Printf("Base URL: %s\n", localURL(cfg, "/v1"))
