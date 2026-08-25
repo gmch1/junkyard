@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   test:
-    name: Build dashboard and test proxy
+    name: Build dashboard and test Go proxy
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,10 +39,10 @@ jobs:
           version: 11.0.9
           run_install: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          python-version: "3.9"
+          go-version: "1.22.x"
 
       - name: Install dashboard dependencies
         run: pnpm --dir dashboard install --frozen-lockfile
@@ -51,11 +51,13 @@ jobs:
         run: |
           pnpm --dir dashboard run lint
           pnpm --dir dashboard run build
+          git diff --exit-code -- dashboard/dist
 
       - name: Test proxy
         run: |
-          python3 -m py_compile aliyun_proxy.py test_aliyun_proxy.py
-          python3 -m unittest -v test_aliyun_proxy.py
+          go mod verify
+          go vet ./...
+          go test -race ./...
 
   macos-app:
     name: Build universal macOS app
@@ -72,6 +74,22 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.22.x"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Build dashboard for embedding
+        run: |
+          pnpm --dir dashboard install --frozen-lockfile
+          pnpm --dir dashboard run build
 
       - name: Install stable macOS signing identity
         if: github.event_name != 'pull_request'
@@ -116,9 +134,7 @@ jobs:
           echo "MACOS_KEYCHAIN_PATH=${keychain_path}" >> "${GITHUB_ENV}"
 
       - name: Test macOS backend
-        run: |
-          cd macos-app/Backend
-          go test -race ./...
+        run: go test -race ./...
 
       - name: Build universal app
         run: |
@@ -177,9 +193,9 @@ jobs:
           trap '"$backend" stop >/dev/null 2>&1 || true' EXIT
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:39291/health)" = "200"
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:39291/)" = "200"
-          test "$(curl -sS http://127.0.0.1:39291/admin/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["configured"])')" = "False"
+          curl -sS http://127.0.0.1:39291/admin/status | grep -q '"configured":false'
           test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'X-Aliyun-Proxy-Admin: 1' --data '{"api_key":"sk-ci-dummy-upstream-key"}' http://127.0.0.1:39291/admin/upstream-key)" = "200"
-          test "$(curl -sS http://127.0.0.1:39291/admin/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["configured"])')" = "True"
+          curl -sS http://127.0.0.1:39291/admin/status | grep -q '"configured":true'
           test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $client_key" http://127.0.0.1:39291/v1/models)" = "200"
           test "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong-key' http://127.0.0.1:39291/v1/models)" = "401"
           "$backend" stop

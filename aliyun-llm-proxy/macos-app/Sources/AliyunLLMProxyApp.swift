@@ -31,6 +31,7 @@ private final class BackendController {
         values["ALIYUN_PROXY_STATE_DIR"] = stateDirectory.path
         values["ALIYUN_PROXY_HOST"] = "0.0.0.0"
         values["ALIYUN_PROXY_PORT"] = String(servicePort)
+        values["ALIYUN_PROXY_ALLOW_LAN"] = "1"
         return values
     }
 
@@ -167,41 +168,14 @@ private final class MenuBarController: NSObject {
     private func openManagementPageIfNeeded() {
         guard managementOpenPending else { return }
         managementOpenPending = false
-        DispatchQueue.main.async { [weak self] in
-            self?.openBrowserUsingWorkspace()
-        }
+        openManagementURL()
     }
 
-    private func openBrowserUsingWorkspace() {
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.addsToRecentItems = false
-        NSWorkspace.shared.open(managementURL, configuration: configuration) { [weak self] _, error in
-            guard let error else { return }
-            DispatchQueue.main.async {
-                self?.openBrowserUsingSystemTool(workspaceError: error)
-            }
-        }
-    }
-
-    private func openBrowserUsingSystemTool(workspaceError: Error) {
-        let process = Process()
-        let errorPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = [managementURL.absoluteString]
-        process.standardError = errorPipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus != 0 else { return }
-            let detail = String(
-                data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
-                encoding: .utf8
-            )?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let message = detail?.isEmpty == false ? detail : nil
-            showError(message ?? workspaceError.localizedDescription)
-        } catch {
-            showError("无法打开管理页面：\(error.localizedDescription)")
+    private func openManagementURL() {
+        precondition(Thread.isMainThread)
+        guard NSWorkspace.shared.open(managementURL) else {
+            showError("无法使用默认浏览器打开管理页面。")
+            return
         }
     }
 

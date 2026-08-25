@@ -16,6 +16,8 @@
 **/.build/
 **/build/
 **/dist/
+!aliyun-llm-proxy/dashboard/dist/
+!aliyun-llm-proxy/dashboard/dist/**
 **/node_modules/
 **/__pycache__/
 **/.aliyun-proxy/

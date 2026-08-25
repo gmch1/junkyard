@@ -8,6 +8,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/v1/proxy/dashboard-data': 'http://127.0.0.1:39281',
+      '/v1/proxy/models/enabled': 'http://127.0.0.1:39281',
+      '/admin': 'http://127.0.0.1:39281',
     },
   },
 })

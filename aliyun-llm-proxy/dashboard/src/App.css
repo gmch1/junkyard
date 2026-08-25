@@ -117,6 +117,16 @@ body {
   padding-top: 4px;
 }
 
+.connection-value {
+  min-width: 0;
+}
+
+.connection-value .mantine-Text-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 48em) {
   .metric-card {
     min-height: 132px;

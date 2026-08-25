@@ -1,152 +1,129 @@
-# 阿里云多模型本地代理
+# 阿里云百炼多模型代理
 
-一个监听 `127.0.0.1:39281` 的 OpenAI Chat Completions 兼容代理。它最初用于 Read Frog 网页翻译，也可以被其他兼容 OpenAI 接口的本地客户端使用。
+这是一个使用 Go 实现的 OpenAI Chat Completions 兼容代理。它面向 Read Frog 等并发翻译客户端，在多个阿里云百炼模型之间调度请求，并提供本机 Dashboard 与 macOS 菜单栏应用。
 
-代理会在多个阿里云百炼模型之间轮询分配请求。模型触发限流、暂时故障或额度耗尽时，会在响应开始前自动切换到下一模型；内置的 Mantine 页面用于查看请求量、模型分配、延迟、Token、限流、冷却状态以及 Python 进程内存。
+项目只有一份后端实现：命令行、Linux/macOS 服务、Dashboard API 和 macOS App 内置服务都编译自根目录的 Go module。仓库不再维护独立的 Python 代理或 macOS 专用代理逻辑。
 
 ## 功能
 
-- OpenAI 兼容接口：`POST /v1/chat/completions`、`GET /v1/models`
-- 分层调度：优先 Qwen-MT，其次使用现有 60 RPM 模型，再从 500 RPM 及以上模型池中随机选择当前负载较低的模型
-- 保留原有模型，并追加经过实际翻译探测的 Qwen、DeepSeek、Kimi 与 MiniMax 稳定版模型；重试与 5 秒对冲复用同一随机调度
-- 识别 429、部分 4xx 和 5xx，并按模型独立冷却或降级
-- 请求超过 5 秒仍无有效结果时，启动一条备用调度通道并采用最先完成的响应
-- 额度永久耗尽的模型写入本地状态，后续启动自动跳过
-- 除 Qwen-MT 适配器外严格透明转发，只替换上游 `model`
-- Qwen-MT 识别 Read Frog 目标语言，支持完整型号 92 种、Lite 31 种语言能力检查
-- 本地 API Key 与阿里云 API Key 持久保存，权限为 `0600`
-- 运行统计每 5 秒批量写入 SQLite，重启代理后继续累计
-- 统计页支持人工禁用和启用模型，状态写回本地配置
-- 运行统计不保存或展示网页正文、提示词和任何 API Key
-- 停止代理时 Python 进程退出，不保留本地模型或额外常驻进程
+- 提供 `POST /v1/chat/completions` 与 `GET /v1/models`。
+- 调用方模型名统一映射为本地别名 `aliyun-translate-auto`。
+- 按优先级、实时负载和随机策略在模型池中分配请求。
+- 本地限制每个模型的 RPM、瞬时 RPS 和最小调用间隔。
+- 遇到 `429`、可重试的 `5xx`、模型无权限或额度耗尽时自动降级。
+- 请求超过默认 5 秒仍未完成时启动一条备用通道，采用最先完成的有效响应。
+- Qwen-MT 自动识别 Read Frog 目标语言，并检查 Lite/完整型号的语言能力。
+- 将永久不可用模型、人工启用状态和累计指标持久保存。
+- Dashboard 展示请求、延迟、Token、对冲、限流、资源使用和完整模型列表。
+- Dashboard 可以禁用/启用模型；恢复不可用模型前会先执行轻量探测。
+- Dashboard 同时管理 DashScope API Key，并展示可复制的客户端连接信息。
+- 不记录请求正文、提示词或任何 API Key。
 
 ## 要求
 
-- Python 3.9 或更高版本；代理运行时只使用标准库
-- Node.js 22 或更高版本与 pnpm 11；仅构建统计页面时需要
-- 已开通阿里云百炼并拥有 DashScope API Key
+- Go 1.22 或更高版本。
+- Node.js 22 与 pnpm 11 仅用于修改和重新构建 Dashboard。
+- 已开通阿里云百炼并拥有 DashScope API Key。
 
-## macOS 应用
+仓库包含已构建的 Dashboard 静态资源，因此正常编译代理不需要 Node.js。
 
-项目提供轻量 macOS 菜单栏应用，不显示 Dock 图标或前台主窗口。启动后应用会拉起内置的静态 Go 后端并打开浏览器管理页，用于填写 DashScope API Key，以及展示可复制的 Base URL、客户端 API Key 和模型名称；不依赖系统 Python 或 Docker。
-
-macOS 应用默认在 `39281` 端口监听局域网，OpenAI 接口仍要求客户端 Bearer Key；不要把该端口转发到公网。网页管理与密钥写入只允许从本机访问，Key 和配置保存到 `~/Library/Application Support/AliyunLLMProxy/`。菜单栏只负责打开管理页和退出：App 运行时代理自动运行，退出 App 时代理自动停止，连接信息统一在网页中复制。
-
-GitHub Actions 会构建同时支持 Apple Silicon 和 Intel Mac 的 ZIP Artifact。本地构建方法和应用说明见 [`macos-app/README.md`](./macos-app/README.md)。原有 Python CLI、本地 Dashboard 和默认回环监听行为保持不变。
-
-## 安装
+## 构建与启动
 
 ```bash
 git clone https://github.com/gmch1/junkyard.git
 cd junkyard/aliyun-llm-proxy
-pnpm --dir dashboard install --frozen-lockfile
-pnpm --dir dashboard run build
-python3 aliyun_proxy.py set-upstream-key
+go build -o build/aliyun-llm-proxy .
+./build/aliyun-llm-proxy start
 ```
 
-最后一条命令会隐藏输入内容。阿里云 Key 保存到：
-
-```text
-.aliyun-proxy/dashscope.key
-```
-
-也可以从环境变量一次性导入：
+首次启动后访问 `http://127.0.0.1:39281/`，可以直接在管理页填写 DashScope API Key。也可以通过命令行安全写入：
 
 ```bash
-DASHSCOPE_API_KEY='你的 Key' python3 aliyun_proxy.py set-upstream-key --from-env
+./build/aliyun-llm-proxy set-upstream-key
+DASHSCOPE_API_KEY='你的 Key' ./build/aliyun-llm-proxy set-upstream-key --from-env
 ```
 
-本地客户端 Key 保存到 `.aliyun-proxy/client.key`。这两个文件、配置覆盖、不可用模型状态、SQLite 指标库、PID 和日志都位于 `.aliyun-proxy/`，已被 Git 忽略，不会提交到仓库。
+代理未配置上游 Key 时仍会启动，以便打开本机管理页；Chat Completions 请求会返回明确的 `upstream_not_configured` 错误。
 
-## 启动和管理
+## 管理命令
 
 ```bash
-python3 aliyun_proxy.py start
-python3 aliyun_proxy.py status
-python3 aliyun_proxy.py logs
-python3 aliyun_proxy.py stop
+./build/aliyun-llm-proxy start
+./build/aliyun-llm-proxy status
+./build/aliyun-llm-proxy logs
+./build/aliyun-llm-proxy stop
+./build/aliyun-llm-proxy restart
+./build/aliyun-llm-proxy key
+./build/aliyun-llm-proxy config
+./build/aliyun-llm-proxy unavailable
+./build/aliyun-llm-proxy reset-unavailable deepseek-v4-flash
+./build/aliyun-llm-proxy reload-key
+./build/aliyun-llm-proxy probe
 ```
 
-其他命令：
+默认状态目录为执行命令时当前目录下的 `.aliyun-proxy/`：
 
-```bash
-python3 aliyun_proxy.py key
-python3 aliyun_proxy.py config
-python3 aliyun_proxy.py unavailable
-python3 aliyun_proxy.py reset-unavailable deepseek-v4-flash
-python3 aliyun_proxy.py restart
-```
+- `proxy.json`：监听、路由、对冲与模型配置。
+- `client.key`：客户端 Bearer Key。
+- `dashscope.key`：阿里云 DashScope Key。
+- `unavailable_models.json`：永久不可用模型状态。
+- `metrics.sqlite3`：累计请求与模型指标。
+- `proxy.pid` / `proxy.log`：后台进程状态和日志。
 
-统计页面：
-
-```text
-http://127.0.0.1:39281/v1
-```
-
-页面每 2 秒在上一请求完成后继续刷新，不会堆积轮询请求。它显示模型采纳率、竞速参与与胜出、丢弃响应、请求延迟和资源用量，并提供模型的禁用和启用按钮。点击模型列表的表头可按状态、采纳率、成功/失败、限流、各项延迟、Token 等指标排列，再次点击切换升降序；排序字段和方向会保存在浏览器 `localStorage`，点击“取消排序”后恢复后端原始顺序。禁用只停止后续调度，不删除模型或历史统计。对额度或权限原因导致的不可用模型点击“启用”时，代理会先直连该模型进行一次轻量检测；只有检测成功才解除不可用状态，失败会以 Toast 显示原因且状态保持不变。
-
-累计指标保存在 `.aliyun-proxy/metrics.sqlite3`，默认每 5 秒批量提交一次，正常停止服务时还会执行最后一次提交。因此异常退出最多损失约 5 秒的新增指标，重启不会清空已落库的数据。数据库只保存计数、Token 汇总和最近延迟样本，不保存请求正文、提示词或任何 API Key。刷新间隔可通过 `.aliyun-proxy/proxy.json` 的 `metrics_flush_interval_seconds` 调整。
-
-`GET /v1/proxy/dashboard-data` 是页面使用的无敏感信息接口；原始状态接口 `GET /v1/proxy/status` 仍要求本地 Bearer Key。模型控制接口只接受同源统计页面带有专用标记的请求，且不允许禁用最后一个可用模型。
+凭证与配置文件权限为 `0600`，状态目录权限为 `0700`。可通过 `ALIYUN_PROXY_STATE_DIR` 改变状态目录。
 
 ## Read Frog 设置
 
-在 `Custom Chat Complete` Provider 中填写：
-
 - Base URL：`http://127.0.0.1:39281/v1`
-- API Key：`python3 aliyun_proxy.py key` 的输出
-- Custom model：可以填写任意字符串，建议用 `aliyun-translate-auto`
+- API Key：Dashboard 中显示的客户端 Key，或 `./build/aliyun-llm-proxy key` 输出。
+- Custom model：`aliyun-translate-auto`
 - Temperature：`0`
 
-建议从以下翻译队列参数开始：
+建议从最大突发请求数 `10`、每秒请求数 `10`、最大字符数 `1000`、最大段落数 `4` 开始，确认没有频繁限流后再逐步提高。旧名称 `translategemma-4b-it` 继续作为兼容别名返回。
 
-- 最大突发请求数：`10`
-- 每秒请求数：`10`
-- 最大字符数：`1000`
-- 最大段落数：`4`
-- 预翻译距离：`1000`
-- 可见比例：`0.1`
+## Dashboard 与指标
 
-确认没有频繁限流后，再逐步提高到每秒 `15` 或 `20`。不建议直接使用 30 RPS，因为百炼还可能检查瞬时增速并返回 `Throttling.BurstRate`。
+Dashboard 每 2 秒在上一请求完成后刷新，展示：
 
-旧名称 `translategemma-4b-it` 作为兼容别名保留。代理不根据调用方填写的模型名选择上游，而是使用自己的模型池。
+- 客户端请求量、成功率与端到端平均/P95/最近延迟。
+- 上游参与、采纳率、模型成功/失败和限流次数。
+- 对冲请求、备用通道胜出和已丢弃响应。
+- 每个模型的状态、近一分钟请求、Token、延迟和冷却原因。
+- Go 服务 RSS 与 CPU 使用。
 
-## 请求透明性与 Qwen-MT 例外
+模型列表支持按表头排序，排序偏好保存在浏览器 `localStorage`。禁用模型只影响后续调度，不删除历史指标；不允许禁用最后一个启用的模型。
 
-除 Qwen-MT 外，代理只把调用方的 `model` 替换为路由选中的阿里云模型；`messages`、提示词、`temperature`、`max_tokens`、`stream` 和其他参数均不新增、不删除、不合并、不改写，因此不会与 Read Frog 的自定义提示词冲突。
+累计指标每 5 秒批量写入 `.aliyun-proxy/metrics.sqlite3`，正常停止时执行最后一次提交。数据库结构与原实现兼容，不保存正文、提示词或凭证。
 
-Qwen-MT 是唯一例外。适配器会从系统提示词和最后一条 User Message 识别目标语言，把 Read Frog 的 `Translate to 目标语言: 正文` 包装剥离为正文，再生成 Qwen-MT 所需的单条 User Message 和 `translation_options`。调用方目标语言优先，不叠加另一套翻译提示词。
+## Qwen-MT 适配
 
-语言表按 Read Frog 使用的 `@read-frog/definitions@0.4.4` 与阿里云 [Qwen-MT 支持语言表](https://help.aliyun.com/zh/model-studio/machine-translation/) 映射，例如：
+除 Qwen-MT 外，代理仅替换上游 `model`，不改写 `messages`、提示词、`temperature`、`max_tokens`、`stream` 或其他参数。
+
+Qwen-MT 会从系统提示词和最后一条 User Message 推断目标语言，移除 `Translate to 目标语言: 正文` 包装，并生成阿里云所需的 `translation_options`。Read Frog 的语言名称会映射为阿里云语言代码，例如：
 
 - `Simplified Mandarin Chinese → zh`
 - `Traditional Mandarin Chinese → zh_tw`
 - `Standard Arabic → ar`
 
-某个 MT 型号不支持目标语言时会在本地跳过；所有 MT 型号都不支持，或阿里云返回“暂时不支持当前设置的语种”，则自动交给通用模型。
+当前 MT 型号不支持目标语言时会尝试其他 MT 型号；所有 MT 型号都不支持或阿里云返回语言参数错误时，自动降级到通用模型。
 
-## 默认模型池
+## 自动降级
 
-默认包含 Qwen Flash、Plus、Instruct 以及 Qwen-MT Flash/Lite/Plus/Turbo。完整配置位于首次启动生成的 `.aliyun-proxy/proxy.json`，筛选数据见 [`aliyun_models_600.json`](./aliyun_models_600.json)。
+| HTTP / 错误码 | 行为 |
+| --- | --- |
+| `429 Throttling.*` | 当前模型冷却并切换下一模型 |
+| `500/502/503/504` | 短暂冷却并切换下一模型 |
+| `403/404 ModelNotFound/Model.AccessDenied` | 暂停当前模型并切换 |
+| `403 AllocationQuota.FreeTierOnly` | 持久禁用当前模型并切换 |
+| Qwen-MT 语种参数错误 | 跳过剩余 MT，切换通用模型 |
+| 其他 `400` | 原样返回，不掩盖请求问题 |
+| `401 InvalidApiKey` | 原样返回，不重复发送 |
 
-官方将部分模型标为 60 RPM，但实际还可能存在隐藏并发、瞬时增速或容量限制。因此这些模型额外设置 `min_interval_seconds: 30`：同一型号 30 秒内最多被选中一次。若其中一个返回 429，同次请求会跳过其他低频型号并直接使用高频池。
-
-`deepseek-v4-flash` 被用作额度探针。账号返回 `403 AllocationQuota.FreeTierOnly` 后，代理将其写入 `.aliyun-proxy/unavailable_models.json` 并在后续启动中跳过。额度恢复后可用 `reset-unavailable` 清除状态。
+若响应包含 `Retry-After`，优先使用上游提供的冷却时间。流式请求在内容发给客户端后不会拼接另一模型的输出。
 
 ## 5 秒延迟对冲
 
-主请求发送 5 秒后仍没有有效响应，代理会开启一条备用通道。备用通道不会指定固定模型，而是再次调用同一个调度器，并排除已经在途或尝试过的型号，因此仍会遵守：
-
-- 模型优先级与轮询游标
-- 60 RPM 型号的 30 秒最小间隔
-- RPM、瞬时 RPS、冷却和持久不可用状态
-- 流式兼容性与 Qwen-MT 语种能力检查
-
-两条通道中第一个得到有效 `2xx` 响应的模型被采纳，另一个响应完成后丢弃。即使备用通道已经启动，主通道先完成时仍然采纳主通道。`429` 和可重试的 `5xx` 仍会立即使用原有降级逻辑，不需要先等待 5 秒。
-
-非流式请求以完整响应到达为准；流式请求会先读取并缓存第一个真实内容片段，以最先产出内容的模型为准，再把缓存片段和后续流原样写给客户端。每个客户端请求最多同时存在一条主通道和一条备用通道，全局默认最多运行 4 条备用通道。
-
-配置位于 `.aliyun-proxy/proxy.json`：
+主请求超过配置的 `hedging.delay_seconds` 后仍未得到有效响应，代理会从同一调度器启动一个备用请求，并排除已经在途或尝试过的模型。最先得到有效响应的通道被采纳，较慢的成功响应完成后计为丢弃。
 
 ```json
 {
@@ -158,59 +135,45 @@ Qwen-MT 是唯一例外。适配器会从系统提示词和最后一条 User Mes
 }
 ```
 
-延迟对冲可能产生一次额外上游调用。Python 标准库无法保证阿里云在本地断开连接后立刻停止推理，因此统计页会分别展示采纳、竞速胜出和丢弃次数，便于根据实际收益判断是否调整阈值。
+对冲可能产生额外的上游调用。Dashboard 会分别展示对冲请求、胜出和丢弃次数。
 
-## 自动降级
+## macOS 应用
 
-规则依据百炼[错误码文档](https://help.aliyun.com/zh/model-studio/error-code/)：
+`macos-app` 是这份 Go 服务的菜单栏启动器。App 不维护另一套代理实现：构建时直接把根目录 Go module 编译成 Universal 后端并放入应用包。
 
-| HTTP / 错误码 | 行为 |
-| --- | --- |
-| `429 Throttling.*` | 当前模型冷却，切换下一模型 |
-| `500/502/503/504` | 当前模型短暂冷却，切换下一模型 |
-| `403/404 ModelNotFound/Model.AccessDenied` | 暂停当前模型，切换下一模型 |
-| `403 AllocationQuota.FreeTierOnly` | 持久禁用当前模型，切换下一模型 |
-| Qwen-MT 语种参数错误 | 跳过剩余 MT，切换通用模型 |
-| 其他 `400` | 原样返回，不掩盖请求问题 |
-| `401 InvalidApiKey` | 原样返回，不重复发送 |
+App 启动后自动保证服务运行，并在默认浏览器打开本机 Dashboard；菜单栏“打开管理页面”可以再次打开。退出 App 会同时停止后端。状态保存在 `~/Library/Application Support/AliyunLLMProxy/`。
 
-若响应包含 `Retry-After`，优先采用服务端给出的等待时间。非流式请求可以在返回内容前安全切换；流式请求一旦已经向客户端发送内容，就不会中途拼接另一模型的输出。
+构建方法见 [`macos-app/README.md`](./macos-app/README.md)。
 
 ## 开发与验证
 
 ```bash
+go test -race ./...
+go vet ./...
+pnpm --dir dashboard install --frozen-lockfile
 pnpm --dir dashboard run lint
 pnpm --dir dashboard run build
-python3 -m py_compile aliyun_proxy.py test_aliyun_proxy.py
-python3 -m unittest -v test_aliyun_proxy.py
 ```
 
-前端开发服务器：
-
-```bash
-pnpm --dir dashboard run dev
-```
-
-Vite 会把统计接口代理到正在运行的 `127.0.0.1:39281` 服务。
+修改 Dashboard 后必须提交重新生成的 `dashboard/dist/`，保证普通 Go 构建不依赖 Node.js。GitHub Actions 会重新构建前端、执行 Go race test，并在 macOS 上构建和验证 Universal App。
 
 ## 安全边界
 
-- 服务默认仅绑定 `127.0.0.1`，不会监听局域网或公网地址。
-- Chat Completions、模型列表和完整状态接口要求本地 Bearer Key。
-- 统计页面与统计数据接口不要求 Key，但仅包含计数、延迟、Token 汇总和进程资源信息。
-- 日志不记录请求正文、完整提示词或 API Key；Qwen-MT 只记录目标语言代码与正文字符数。
-- 仓库不会提交 `.aliyun-proxy/`、`*.key`、日志、前端依赖或构建产物。
+- 根目录 CLI 默认只监听 `127.0.0.1`。
+- OpenAI 接口和完整状态接口要求客户端 Bearer Key。
+- Dashboard、Dashboard 数据、凭证写入和模型控制仅接受回环连接。
+- macOS App 可在可信局域网监听 OpenAI 接口，但管理端点仍仅限本机。
+- 不要把代理端口转发到公网。
+- 日志和 SQLite 指标不保存请求正文、提示词或任何 API Key。
 
-### 可选的进程环境变量
-
-发行包或服务管理器可以显式覆盖运行位置与监听方式：
+### 运行时环境变量
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ALIYUN_PROXY_STATE_DIR` | 项目内 `.aliyun-proxy/` | Key、配置、日志和 SQLite 状态目录 |
-| `ALIYUN_PROXY_HOST` | 配置文件中的 `127.0.0.1` | 进程本次运行使用的监听地址 |
-| `ALIYUN_PROXY_PORT` | 配置文件中的 `39281` | 进程本次运行使用的端口 |
-| `ALIYUN_PROXY_ALLOW_LAN` | `false` | 非回环监听的显式安全开关 |
-| `ALIYUN_PROXY_DASHBOARD_ENABLED` | `true` | 是否在业务 HTTP 服务上提供 Dashboard |
+| `ALIYUN_PROXY_STATE_DIR` | 当前目录 `.aliyun-proxy/` | 状态、凭证与日志目录 |
+| `ALIYUN_PROXY_HOST` | 配置中的 `127.0.0.1` | 本次进程监听地址 |
+| `ALIYUN_PROXY_PORT` | 配置中的 `39281` | 本次进程监听端口 |
+| `ALIYUN_PROXY_ALLOW_LAN` | 配置值 | 显式允许非回环监听 |
+| `ALIYUN_PROXY_DASHBOARD_ENABLED` | `true` | 是否提供仅限本机的 Dashboard |
 
-这些覆盖只作用于当前进程，不回写 `proxy.json`。非回环地址必须同时设置 `ALIYUN_PROXY_ALLOW_LAN=1` 和 `ALIYUN_PROXY_DASHBOARD_ENABLED=0`，因此单独误设监听地址不会意外开放服务或管理页面。
+环境变量只影响当前进程，不用于保存凭证。

@@ -8,6 +8,7 @@ import {
   Group,
   Loader,
   Paper,
+  PasswordInput,
   Progress,
   ScrollArea,
   SimpleGrid,
@@ -79,6 +80,8 @@ type DashboardData = {
   uptime_seconds: number
   base_url: string
   model_alias: string
+  configured?: boolean
+  client_key?: string
   metrics_persistence: {
     enabled: boolean
     flush_interval_seconds: number
@@ -488,6 +491,8 @@ function App() {
   useDocumentTitle('阿里云模型代理 · 运行统计')
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [savingKey, setSavingKey] = useState(false)
   const [pendingModel, setPendingModel] = useState('')
   const [modelSort, setModelSort] = useState<ModelSort | null>(loadModelSort)
 
@@ -499,7 +504,7 @@ function App() {
     const refresh = async () => {
       controller = new AbortController()
       try {
-        const response = await fetch('/v1/proxy/dashboard-data', {
+        const response = await fetch('/admin/status', {
           cache: 'no-store',
           signal: controller.signal,
         })
@@ -570,13 +575,13 @@ function App() {
         error?: { message?: string; upstream_code?: string }
       }
       if (!response.ok || !payload.dashboard) {
-        if (payload.dashboard) setData(payload.dashboard)
+        if (payload.dashboard) setData((current) => current ? { ...current, ...payload.dashboard } : payload.dashboard ?? null)
         const message = payload.error?.upstream_code?.includes('AllocationQuota')
           ? '模型额度仍未恢复，当前状态保持不变。'
           : payload.error?.message || `HTTP ${response.status}`
         throw new Error(message)
       }
-      setData(payload.dashboard)
+      setData((current) => current ? { ...current, ...payload.dashboard } : payload.dashboard ?? null)
       notifications.show({
         title: enabled ? '模型已启用' : '模型已禁用',
         message: payload.probed
@@ -592,6 +597,44 @@ function App() {
       })
     } finally {
       setPendingModel('')
+    }
+  }
+
+  const copyValue = async (label: string, value?: string) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      notifications.show({ title: `${label} 已复制`, message: value, color: 'teal' })
+    } catch {
+      notifications.show({ title: '复制失败', message: '请手动选择并复制。', color: 'red' })
+    }
+  }
+
+  const saveUpstreamKey = async () => {
+    const value = apiKey.trim()
+    if (value.length < 8) {
+      notifications.show({ title: 'API Key 格式不正确', message: '请检查后重新输入。', color: 'red' })
+      return
+    }
+    setSavingKey(true)
+    try {
+      const response = await fetch('/admin/upstream-key', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Aliyun-Proxy-Admin': '1',
+        },
+        body: JSON.stringify({ api_key: value }),
+      })
+      const payload = await response.json() as DashboardData & { error?: { message?: string } }
+      if (!response.ok) throw new Error(payload.error?.message || `HTTP ${response.status}`)
+      setData(payload)
+      setApiKey('')
+      notifications.show({ title: 'DashScope API Key 已保存', message: '新请求会立即使用新的密钥。', color: 'teal' })
+    } catch (caught) {
+      notifications.show({ title: '保存失败', message: caught instanceof Error ? caught.message : '未知错误', color: 'red' })
+    } finally {
+      setSavingKey(false)
     }
   }
 
@@ -619,6 +662,63 @@ function App() {
               {error}；页面会自动重试。
             </Alert>
           )}
+
+          <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+            <Paper radius="lg" p="lg" withBorder>
+              <Stack gap="md">
+                <Group justify="space-between">
+                  <Text fw={700}>客户端连接</Text>
+                  <Badge color={data?.configured ? 'teal' : 'orange'} variant="light">
+                    {data?.configured ? '上游已配置' : '等待配置'}
+                  </Badge>
+                </Group>
+                <Stack gap="xs">
+                  <Group justify="space-between" wrap="nowrap">
+                    <Stack gap={1} className="connection-value">
+                      <Text size="xs" c="dimmed">Base URL</Text>
+                      <Text size="sm" ff="monospace">{data?.base_url ?? '正在获取…'}</Text>
+                    </Stack>
+                    <Button size="xs" variant="light" onClick={() => copyValue('Base URL', data?.base_url)}>复制</Button>
+                  </Group>
+                  <Group justify="space-between" wrap="nowrap">
+                    <Stack gap={1} className="connection-value">
+                      <Text size="xs" c="dimmed">客户端 API Key</Text>
+                      <Text size="sm" ff="monospace">{data?.client_key ?? '正在获取…'}</Text>
+                    </Stack>
+                    <Button size="xs" variant="light" onClick={() => copyValue('客户端 API Key', data?.client_key)}>复制</Button>
+                  </Group>
+                  <Group justify="space-between" wrap="nowrap">
+                    <Stack gap={1} className="connection-value">
+                      <Text size="xs" c="dimmed">模型名称</Text>
+                      <Text size="sm" ff="monospace">{data?.model_alias ?? 'aliyun-translate-auto'}</Text>
+                    </Stack>
+                    <Button size="xs" variant="light" onClick={() => copyValue('模型名称', data?.model_alias)}>复制</Button>
+                  </Group>
+                </Stack>
+              </Stack>
+            </Paper>
+
+            <Paper radius="lg" p="lg" withBorder>
+              <Stack gap="md">
+                <Stack gap={2}>
+                  <Text fw={700}>阿里云百炼凭证</Text>
+                  <Text size="xs" c="dimmed">密钥仅写入本机状态目录，保存后不会再次显示。</Text>
+                </Stack>
+                <PasswordInput
+                  label="DashScope API Key"
+                  placeholder="sk-xxxxxxxxxxxxxxxx"
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void saveUpstreamKey()
+                  }}
+                />
+                <Button loading={savingKey} onClick={() => void saveUpstreamKey()}>
+                  {data?.configured ? '更新 API Key' : '保存 API Key'}
+                </Button>
+              </Stack>
+            </Paper>
+          </SimpleGrid>
 
           <SimpleGrid cols={{ base: 1, xs: 2, md: 3, lg: 4 }} spacing="md">
             <MetricCard
@@ -650,7 +750,7 @@ function App() {
               color="violet"
             />
             <MetricCard
-              title="Python 内存"
+              title="Go 服务内存"
               value={data ? `${data.process.rss_mb.toFixed(1)} MB` : '—'}
               detail={`CPU ${data?.process.cpu_percent.toFixed(1) ?? '—'}%`}
               icon={IconCpu}
@@ -696,7 +796,7 @@ function App() {
 
           <Group justify="space-between" className="footer" gap="sm">
             <Text size="xs" c="dimmed">Base URL：{data?.base_url ?? 'http://127.0.0.1:39281/v1'}</Text>
-            <Text size="xs" c="dimmed">运行时长：{data ? formatUptime(data.uptime_seconds) : '—'} · 页面不展示密钥、提示词或正文</Text>
+            <Text size="xs" c="dimmed">运行时长：{data ? formatUptime(data.uptime_seconds) : '—'} · 管理页仅允许本机访问，不记录提示词或正文</Text>
           </Group>
         </Stack>
       </Container>
