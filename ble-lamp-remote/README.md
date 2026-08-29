@@ -29,6 +29,7 @@ Android 常驻 API（仅绑定私有 IPv4）
 - Android 页面可以复制 API 地址和 256 位随机 Token；
 - macOS 卡片可从通用剪贴板导入地址和 Token。
 - 已有可用遥控器时，Android 启动后直接进入控制页；
+- Android 使用固定的“设备 / 遥控 / 设置”底部导航，控制页顶部只保留录制入口；
 - LAN API 默认关闭，其地址、Token 和启停开关集中在设置页；
 - Android 可从 GitHub Release 检查更新，安装前校验大小、SHA-256、包名、版本和签名证书。
 
@@ -195,6 +196,7 @@ install -m 600 /path/to/api-token \
 - Android APK 本地构建和签名校验；
 - Xiaomi M2104K10AC / Android 13 安装与前台常驻；
 - Android 1.3.0 启动直达控制页，开关、调光与两个模式切换使用三行紧凑按钮；
+- 设备、遥控与设置三个底部导航项可在真机上切换，当前页使用高亮指示；
 - LAN API 默认关闭，设置页启停时 `8791` 与前台服务同步出现或消失；
 - 无 Token 请求返回 `401`；
 - 正确 Token 的 `/v1/status` 返回 `200`；

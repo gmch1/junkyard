@@ -135,31 +135,6 @@ public final class MainActivity extends Activity {
                 Gravity.CENTER);
         header.addView(heading, headingParams);
 
-        TextView back = centeredLabel("‹", Color.rgb(50, 46, 39), 38);
-        back.setContentDescription("返回");
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                showHomeScreen();
-            }
-        });
-        FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(
-                dp(46), dp(58), Gravity.START | Gravity.CENTER_VERTICAL);
-        header.addView(back, backParams);
-
-        TextView settings = centeredLabel("⚙", Color.rgb(100, 73, 28), 20);
-        settings.setContentDescription("设置");
-        settings.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                showSettingsScreen();
-            }
-        });
-        FrameLayout.LayoutParams settingsParams = new FrameLayout.LayoutParams(
-                dp(42), dp(58), Gravity.END | Gravity.CENTER_VERTICAL);
-        settingsParams.rightMargin = dp(54);
-        header.addView(settings, settingsParams);
-
         TextView learn = centeredLabel("录制", Color.rgb(100, 73, 28), 14);
         learn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         learn.setContentDescription("录制新遥控器");
@@ -189,7 +164,7 @@ public final class MainActivity extends Activity {
         scroll.addView(root, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
-        setContentView(scroll);
+        setContentWithBottomNavigation(scroll, SCREEN_CONTROL);
     }
 
     private void showSettingsScreen() {
@@ -206,16 +181,6 @@ public final class MainActivity extends Activity {
         header.addView(title, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER));
-        TextView back = centeredLabel("‹", Color.rgb(50, 46, 39), 38);
-        back.setContentDescription("返回遥控器");
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                showControlScreen();
-            }
-        });
-        header.addView(back, new FrameLayout.LayoutParams(dp(46), dp(58),
-                Gravity.START | Gravity.CENTER_VERTICAL));
         root.addView(header, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(58)));
 
@@ -269,19 +234,10 @@ public final class MainActivity extends Activity {
         noteParams.setMargins(0, dp(12), 0, 0);
         root.addView(note, noteParams);
 
-        statusView = centeredLabel(apiEnabled
-                        ? "●  局域网遥控服务已启动"
-                        : "●  局域网遥控服务已关闭",
-                Color.rgb(112, 99, 72), 13);
-        statusView.setTextIsSelectable(true);
-        statusView.setPadding(dp(16), dp(12), dp(16), dp(12));
-        statusView.setBackground(rounded(Color.argb(120, 255, 255, 255), 22));
-        LinearLayout.LayoutParams statusParams = matchWrap();
-        statusParams.setMargins(0, dp(8), 0, 0);
-        root.addView(statusView, statusParams);
+        statusView = new TextView(this);
 
         scroll.addView(root);
-        setContentView(scroll);
+        setContentWithBottomNavigation(scroll, SCREEN_SETTINGS);
     }
 
     private void showHomeScreen() {
@@ -375,19 +331,11 @@ public final class MainActivity extends Activity {
         recordParams.setMargins(0, dp(18), 0, 0);
         root.addView(recordButton, recordParams);
 
-        statusView = centeredLabel(LightApiService.isEnabled(this)
-                        ? "●  局域网遥控服务准备中"
-                        : "●  局域网遥控服务已关闭",
-                Color.rgb(112, 99, 72), 13);
-        statusView.setTextIsSelectable(true);
-        statusView.setPadding(dp(14), dp(11), dp(14), dp(11));
-        statusView.setBackground(rounded(Color.argb(115, 255, 255, 255), 18));
-        LinearLayout.LayoutParams statusParams = matchWrap();
-        statusParams.setMargins(0, dp(18), 0, 0);
-        root.addView(statusView, statusParams);
+        // LAN API state and controls belong exclusively to Settings.
+        statusView = new TextView(this);
 
         scroll.addView(root);
-        setContentView(scroll);
+        setContentWithBottomNavigation(scroll, SCREEN_HOME);
     }
 
     private LinearLayout deviceCard(RemoteProfileStore.RemoteProfile profile) {
@@ -449,6 +397,84 @@ public final class MainActivity extends Activity {
         label.setTextSize(14);
         label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         return label;
+    }
+
+    private void setContentWithBottomNavigation(View content, String selectedScreen) {
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
+        shell.setBackgroundColor(Color.rgb(255, 251, 236));
+        shell.addView(content, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+        shell.addView(bottomNavigation(selectedScreen), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(74)));
+        setContentView(shell);
+    }
+
+    private LinearLayout bottomNavigation(String selectedScreen) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER);
+        bar.setPadding(dp(10), dp(6), dp(10), dp(6));
+        bar.setBackgroundColor(Color.rgb(255, 253, 246));
+        bar.setElevation(dp(8));
+
+        addNavigationItem(bar, "设备", BottomNavigationIcon.DEVICES,
+                SCREEN_HOME, selectedScreen);
+        addNavigationItem(bar, "遥控", BottomNavigationIcon.REMOTE,
+                SCREEN_CONTROL, selectedScreen);
+        addNavigationItem(bar, "设置", BottomNavigationIcon.SETTINGS,
+                SCREEN_SETTINGS, selectedScreen);
+        return bar;
+    }
+
+    private void addNavigationItem(LinearLayout bar, String label, int iconType,
+            final String destination, String selectedScreen) {
+        boolean selected = destination.equals(selectedScreen);
+        int active = Color.rgb(151, 91, 20);
+        int inactive = Color.rgb(119, 111, 96);
+
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        item.setPadding(dp(4), dp(4), dp(4), dp(3));
+        item.setBackground(rounded(selected
+                ? Color.rgb(255, 239, 202) : Color.TRANSPARENT, 18));
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setContentDescription(label);
+
+        BottomNavigationIcon icon = new BottomNavigationIcon(
+                this, iconType, selected ? active : inactive);
+        item.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView text = centeredLabel(label, selected ? active : inactive, 11.5f);
+        text.setTypeface(Typeface.DEFAULT, selected ? Typeface.BOLD : Typeface.NORMAL);
+        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        textParams.setMargins(0, dp(2), 0, 0);
+        item.addView(text, textParams);
+
+        item.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                if (destination.equals(currentScreen)) {
+                    return;
+                }
+                if (SCREEN_HOME.equals(destination)) {
+                    showHomeScreen();
+                } else if (SCREEN_SETTINGS.equals(destination)) {
+                    showSettingsScreen();
+                } else {
+                    showControlScreen();
+                }
+            }
+        });
+
+        LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1);
+        itemParams.setMargins(dp(4), 0, dp(4), 0);
+        bar.addView(item, itemParams);
     }
 
     private ScrollView pageScroll() {
@@ -1287,7 +1313,9 @@ public final class MainActivity extends Activity {
                 statusView.setText("●  可以使用");
             } else {
                 LightApiService.setEnabled(this, false);
-                statusView.setText("需要附近设备权限才能发送灯控指令");
+                Toast.makeText(this, "需要附近设备权限才能启用局域网遥控",
+                        Toast.LENGTH_LONG).show();
+                showSettingsScreen();
             }
             return;
         }
@@ -1355,6 +1383,91 @@ public final class MainActivity extends Activity {
             appUpdateManager.close();
         }
         super.onDestroy();
+    }
+
+    private static final class BottomNavigationIcon extends View {
+        static final int DEVICES = 1;
+        static final int REMOTE = 2;
+        static final int SETTINGS = 3;
+
+        private final int type;
+        private final int color;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+
+        BottomNavigationIcon(Activity context, int type, int color) {
+            super(context);
+            this.type = type;
+            this.color = color;
+            density = context.getResources().getDisplayMetrics().density;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float cx = getWidth() / 2f;
+            float cy = getHeight() / 2f;
+            float size = Math.min(getWidth(), getHeight());
+            paint.setColor(color);
+            paint.setStrokeWidth(Math.max(1.5f * density, size * 0.075f));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            if (type == DEVICES) {
+                drawDevices(canvas, cx, cy, size);
+            } else if (type == REMOTE) {
+                drawRemote(canvas, cx, cy, size);
+            } else {
+                drawSettings(canvas, cx, cy, size);
+            }
+        }
+
+        private void drawDevices(Canvas canvas, float cx, float cy, float size) {
+            paint.setStyle(Paint.Style.FILL);
+            float cell = size * 0.25f;
+            float gap = size * 0.09f;
+            float left = cx - cell - gap / 2f;
+            float top = cy - cell - gap / 2f;
+            float radius = size * 0.06f;
+            canvas.drawRoundRect(new RectF(left, top, left + cell, top + cell),
+                    radius, radius, paint);
+            canvas.drawRoundRect(new RectF(left + cell + gap, top,
+                            left + cell * 2f + gap, top + cell),
+                    radius, radius, paint);
+            canvas.drawRoundRect(new RectF(left, top + cell + gap,
+                            left + cell, top + cell * 2f + gap),
+                    radius, radius, paint);
+            canvas.drawRoundRect(new RectF(left + cell + gap, top + cell + gap,
+                            left + cell * 2f + gap, top + cell * 2f + gap),
+                    radius, radius, paint);
+        }
+
+        private void drawRemote(Canvas canvas, float cx, float cy, float size) {
+            paint.setStyle(Paint.Style.STROKE);
+            RectF body = new RectF(cx - size * 0.25f, cy - size * 0.42f,
+                    cx + size * 0.25f, cy + size * 0.42f);
+            canvas.drawRoundRect(body, size * 0.15f, size * 0.15f, paint);
+            paint.setStyle(Paint.Style.FILL);
+            canvas.drawCircle(cx, cy - size * 0.17f, size * 0.075f, paint);
+            canvas.drawRoundRect(new RectF(cx - size * 0.11f, cy + size * 0.08f,
+                            cx + size * 0.11f, cy + size * 0.15f),
+                    size * 0.035f, size * 0.035f, paint);
+        }
+
+        private void drawSettings(Canvas canvas, float cx, float cy, float size) {
+            paint.setStyle(Paint.Style.STROKE);
+            float inner = size * 0.12f;
+            float outer = size * 0.29f;
+            canvas.drawCircle(cx, cy, inner, paint);
+            canvas.drawCircle(cx, cy, outer, paint);
+            for (int index = 0; index < 8; index++) {
+                double angle = index * Math.PI / 4.0;
+                float x1 = cx + (float) Math.cos(angle) * size * 0.34f;
+                float y1 = cy + (float) Math.sin(angle) * size * 0.34f;
+                float x2 = cx + (float) Math.cos(angle) * size * 0.44f;
+                float y2 = cy + (float) Math.sin(angle) * size * 0.44f;
+                canvas.drawLine(x1, y1, x2, y2, paint);
+            }
+        }
     }
 
     private static final class RemoteIconView extends View {
