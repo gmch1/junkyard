@@ -9,8 +9,16 @@ if [[ -z "$sdk_root" ]]; then
   exit 1
 fi
 
-build_tools_dir="$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' | sort -V | tail -n 1)"
-platform_dir="$(find "$sdk_root/platforms" -mindepth 1 -maxdepth 1 -type d -name 'android-*' -printf '%p\n' | sort -V | tail -n 1)"
+if [[ -n "${ANDROID_BUILD_TOOLS_VERSION:-}" ]]; then
+  build_tools_dir="$sdk_root/build-tools/$ANDROID_BUILD_TOOLS_VERSION"
+else
+  build_tools_dir="$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' | sort -V | tail -n 1)"
+fi
+if [[ -n "${ANDROID_PLATFORM_VERSION:-}" ]]; then
+  platform_dir="$sdk_root/platforms/android-$ANDROID_PLATFORM_VERSION"
+else
+  platform_dir="$(find "$sdk_root/platforms" -mindepth 1 -maxdepth 1 -type d -name 'android-*' -printf '%p\n' | sort -V | tail -n 1)"
+fi
 android_jar="$platform_dir/android.jar"
 
 for tool in aapt2 d8 zipalign apksigner; do
