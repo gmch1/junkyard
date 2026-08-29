@@ -1,0 +1,207 @@
+name: BLE Lamp Remote
+
+on:
+  pull_request:
+    paths:
+      - "ble-lamp-remote/**"
+      - ".github/workflows/ble-lamp-remote.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "ble-lamp-remote-v*"
+    paths:
+      - "ble-lamp-remote/**"
+      - ".github/workflows/ble-lamp-remote.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ble-lamp-remote/android
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build and verify development APK
+        run: |
+          set -euo pipefail
+          chmod +x build.sh ble-probe.sh
+          apk="$(./build.sh)"
+          test -f "${apk}"
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose "${apk}"
+          "${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "${apk}" \
+            | head -n 1 \
+            | grep -F "name='com.ming.lightprobe'"
+
+      - name: Upload development APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: ble-lamp-remote-android-development
+          path: ble-lamp-remote/android/build/ble-lamp-remote-debug.apk
+          if-no-files-found: error
+
+      - name: Restore release signing key
+        if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
+        env:
+          BLE_LAMP_ANDROID_KEYSTORE_BASE64: ${{ secrets.BLE_LAMP_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "${BLE_LAMP_ANDROID_KEYSTORE_BASE64}"
+          keystore="${RUNNER_TEMP}/ble-lamp-remote-release.keystore"
+          printf '%s' "${BLE_LAMP_ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${keystore}"
+          chmod 600 "${keystore}"
+          echo "BLE_LAMP_RELEASE_KEYSTORE=${keystore}" >> "${GITHUB_ENV}"
+
+      - name: Build signed release and update manifest
+        if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BLE_LAMP_ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.BLE_LAMP_ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.BLE_LAMP_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_KEYSTORE_PASSWORD}"
+          test -n "${ANDROID_KEY_ALIAS}"
+          test -n "${ANDROID_KEY_PASSWORD}"
+          mkdir -p release-assets
+          apk="${PWD}/release-assets/ble-lamp-remote-android.apk"
+          ANDROID_KEYSTORE_PATH="${BLE_LAMP_RELEASE_KEYSTORE}" \
+          ANDROID_APK_OUTPUT="${apk}" \
+            ./build.sh >/dev/null
+
+          package_line="$("${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "${apk}" | head -n 1)"
+          version_code="$(sed -nE "s/^package: .*versionCode='([^']*)'.*/\1/p" <<<"${package_line}")"
+          version_name="$(sed -nE "s/^package: .*versionName='([^']*)'.*/\1/p" <<<"${package_line}")"
+          test "${GITHUB_REF_NAME}" = "ble-lamp-remote-v${version_name}"
+          grep -Fq "name='com.ming.lightprobe'" <<<"${package_line}"
+
+          expected_signer_sha256="0936de8a2635b0a83f37337fc82a56bf32c56e0f1c74d04857599a0e2d991f46"
+          actual_signer_sha256="$("${ANDROID_HOME}/build-tools/35.0.0/apksigner" \
+            verify --verbose --print-certs "${apk}" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          test "${actual_signer_sha256}" = "${expected_signer_sha256}"
+
+          sha256="$(sha256sum "${apk}" | cut -d ' ' -f 1)"
+          size_bytes="$(stat -c '%s' "${apk}")"
+          download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/ble-lamp-remote-android.apk"
+          jq -n \
+            --arg applicationId "com.ming.lightprobe" \
+            --argjson versionCode "${version_code}" \
+            --arg versionName "${version_name}" \
+            --arg downloadUrl "${download_url}" \
+            --arg sha256 "${sha256}" \
+            --arg signerSha256 "${actual_signer_sha256}" \
+            --argjson sizeBytes "${size_bytes}" \
+            --arg releaseNotes "精简遥控器布局，将 LAN API 移至默认关闭的设置页，并加入安全的应用内更新。" \
+            '{applicationId:$applicationId,versionCode:$versionCode,versionName:$versionName,downloadUrl:$downloadUrl,sha256:$sha256,signerSha256:$signerSha256,sizeBytes:$sizeBytes,releaseNotes:$releaseNotes}' \
+            > release-assets/ble-lamp-remote-android.json
+          sha256sum "${apk}" > release-assets/SHA256SUMS
+
+      - name: Upload signed Android release
+        if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
+        uses: actions/upload-artifact@v6
+        with:
+          name: ble-lamp-remote-android-release
+          path: ble-lamp-remote/android/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: Build macOS app
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: ble-lamp-remote/macos
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build app
+        run: |
+          chmod +x build.sh
+          zsh build.sh
+
+      - name: Verify bundle
+        run: |
+          set -euo pipefail
+          app="build/LampRemoteWidget.app"
+          test -x "${app}/Contents/MacOS/LampRemoteWidget"
+          plutil -lint "${app}/Contents/Info.plist"
+          codesign --verify --deep --strict "${app}"
+          file "${app}/Contents/MacOS/LampRemoteWidget"
+
+      - name: Package app
+        run: ditto -c -k --keepParent build/LampRemoteWidget.app LampRemoteWidget-macos.zip
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v6
+        with:
+          name: ble-lamp-remote-macos
+          path: ble-lamp-remote/macos/LampRemoteWidget-macos.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
+    needs:
+      - android
+      - macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Android release
+        uses: actions/download-artifact@v6
+        with:
+          name: ble-lamp-remote-android-release
+          path: release-assets
+
+      - name: Download macOS release
+        uses: actions/download-artifact@v6
+        with:
+          name: ble-lamp-remote-macos
+          path: release-assets
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(
+            release-assets/ble-lamp-remote-android.apk
+            release-assets/ble-lamp-remote-android.json
+            release-assets/SHA256SUMS
+            release-assets/LampRemoteWidget-macos.zip
+          )
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "BLE Lamp Remote ${GITHUB_REF_NAME#ble-lamp-remote-v}" \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
