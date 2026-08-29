@@ -19,6 +19,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -117,7 +118,7 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(edge, dp(14), edge, dp(28));
+        root.setPadding(edge, dp(8), edge, dp(18));
 
         FrameLayout header = new FrameLayout(this);
         LinearLayout heading = new LinearLayout(this);
@@ -125,14 +126,9 @@ public final class MainActivity extends Activity {
         heading.setGravity(Gravity.CENTER);
         final RemoteProfileStore.RemoteProfile activeProfile =
                 RemoteProfileStore.active(this);
-        TextView title = centeredLabel(activeProfile.name, Color.rgb(29, 27, 23), 24);
+        TextView title = centeredLabel(activeProfile.name, Color.rgb(29, 27, 23), 21);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         heading.addView(title, matchWrap());
-        TextView help = centeredLabel(
-                activeProfile.verified ? "已验证 · 蓝牙直控" : "已录制 · 蓝牙直控",
-                Color.rgb(105, 94, 75), 13);
-        help.setPadding(0, dp(2), 0, 0);
-        heading.addView(help, matchWrap());
         FrameLayout.LayoutParams headingParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -177,32 +173,22 @@ public final class MainActivity extends Activity {
                 dp(54), dp(58), Gravity.END | Gravity.CENTER_VERTICAL);
         header.addView(learn, learnParams);
         root.addView(header, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(68)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(60)));
 
-        TextView deviceSummary = new TextView(this);
-        deviceSummary.setText("遥控器已就绪 · 点击即可连续发送");
-        deviceSummary.setTextColor(Color.rgb(112, 99, 72));
-        deviceSummary.setTextSize(14);
-        deviceSummary.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams summaryParams = matchWrap();
-        summaryParams.setMargins(0, dp(32), 0, dp(14));
-        root.addView(deviceSummary, summaryParams);
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setGravity(Gravity.CENTER);
+        addRemoteControls(controls);
+        root.addView(controls, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
-        addRemoteControls(root);
-
+        // Keep a non-visible status sink for shared permission/error paths. The control
+        // screen has no persistent or selectable status chrome.
         statusView = new TextView(this);
-        statusView.setText("●  可以使用");
-        statusView.setTextIsSelectable(true);
-        statusView.setTextColor(Color.rgb(112, 99, 72));
-        statusView.setTextSize(13);
-        statusView.setGravity(Gravity.CENTER);
-        statusView.setPadding(dp(16), dp(12), dp(16), dp(12));
-        statusView.setBackground(rounded(Color.argb(120, 255, 255, 255), 22));
-        LinearLayout.LayoutParams statusParams = matchWrap();
-        statusParams.setMargins(0, dp(18), 0, 0);
-        root.addView(statusView, statusParams);
 
-        scroll.addView(root);
+        scroll.addView(root, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(scroll);
     }
 
@@ -746,11 +732,11 @@ public final class MainActivity extends Activity {
                 new int[][] {{0x11, 0, 0, 0, 0}});
 
         LinearLayout.LayoutParams powerButtonParams = new LinearLayout.LayoutParams(
-                0, dp(88), 1);
+                0, dp(72), 1);
         powerButtonParams.setMargins(0, 0, dp(6), 0);
         powerRow.addView(powerOn, powerButtonParams);
         LinearLayout.LayoutParams offParams = new LinearLayout.LayoutParams(
-                0, dp(88), 1);
+                0, dp(72), 1);
         offParams.setMargins(dp(6), 0, 0, 0);
         powerRow.addView(powerOff, offParams);
         root.addView(powerRow, matchWrap());
@@ -763,34 +749,28 @@ public final class MainActivity extends Activity {
         LinearLayout brighter = sceneButton("调亮", RemoteIconView.PLUS, "亮度增加",
                 new int[][] {{0x39, 0, 0, 0, 0}, {0x21, 0x14, 0, 2, 0}},
                 Color.rgb(255, 241, 204), Color.rgb(119, 79, 19));
-        addPairButtons(brightnessRow, dimmer, brighter);
+        addRemotePairButtons(brightnessRow, dimmer, brighter);
         LinearLayout.LayoutParams brightnessParams = matchWrap();
         brightnessParams.setMargins(0, dp(12), 0, 0);
         root.addView(brightnessRow, brightnessParams);
 
-        LinearLayout colorRow = new LinearLayout(this);
-        colorRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout warmer = sceneButton("暖光", RemoteIconView.WARM, "色温偏暖",
-                warmCommands(), Color.rgb(255, 239, 218), Color.rgb(158, 81, 24));
-        LinearLayout cooler = sceneButton("冷光", RemoteIconView.COOL, "色温偏冷",
-                coolCommands(), Color.rgb(237, 244, 255), Color.rgb(55, 76, 113));
-        addPairButtons(colorRow, warmer, cooler);
-        LinearLayout.LayoutParams colorParams = matchWrap();
-        colorParams.setMargins(0, dp(12), 0, 0);
-        root.addView(colorRow, colorParams);
-
-        LinearLayout presetRow = new LinearLayout(this);
-        presetRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout full = sceneButton("全亮", RemoteIconView.SUN, "全亮",
-                new int[][] {{0x21, 2, 255, 255, 0}},
-                Color.rgb(255, 246, 219), Color.rgb(142, 91, 18));
-        LinearLayout half = sceneButton("半亮", RemoteIconView.HALF, "半亮",
-                new int[][] {{0x21, 1, 127, 127, 0}},
+        LinearLayout toggleRow = new LinearLayout(this);
+        toggleRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout temperature = sceneButton("冷光 / 暖光", RemoteIconView.WARM,
+                "切换暖光", warmCommands(),
+                Color.rgb(255, 239, 218), Color.rgb(133, 75, 30));
+        setAlternatingRemoteAction(temperature,
+                "切换暖光", warmCommands(), "切换冷光", coolCommands());
+        LinearLayout brightnessPreset = sceneButton("全亮 / 半亮", RemoteIconView.HALF,
+                "切换半亮", new int[][] {{0x21, 1, 127, 127, 0}},
                 Color.rgb(241, 239, 248), Color.rgb(76, 69, 105));
-        addPairButtons(presetRow, full, half);
-        LinearLayout.LayoutParams presetParams = matchWrap();
-        presetParams.setMargins(0, dp(12), 0, 0);
-        root.addView(presetRow, presetParams);
+        setAlternatingRemoteAction(brightnessPreset,
+                "切换半亮", new int[][] {{0x21, 1, 127, 127, 0}},
+                "切换全亮", new int[][] {{0x21, 2, 255, 255, 0}});
+        addRemotePairButtons(toggleRow, temperature, brightnessPreset);
+        LinearLayout.LayoutParams toggleParams = matchWrap();
+        toggleParams.setMargins(0, dp(12), 0, 0);
+        root.addView(toggleRow, toggleParams);
     }
 
     private LinearLayout powerButton(String text, boolean on, String label,
@@ -798,24 +778,24 @@ public final class MainActivity extends Activity {
         LinearLayout button = new LinearLayout(this);
         button.setOrientation(LinearLayout.HORIZONTAL);
         button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(16), 0, dp(16), 0);
-        button.setBackground(touchBackground(Color.WHITE,
-                on ? Color.rgb(255, 245, 237) : Color.rgb(244, 243, 249), 20));
-        button.setElevation(dp(1));
+        button.setPadding(dp(12), 0, dp(12), 0);
+        int background = on ? Color.rgb(255, 237, 225) : Color.rgb(240, 238, 247);
+        int foreground = on ? Color.rgb(179, 73, 28) : Color.rgb(57, 50, 89);
+        button.setBackground(touchBackground(background, blendWithWhite(background), 20));
         button.setClickable(true);
         button.setFocusable(true);
         button.setContentDescription(text);
 
         RemoteIconView icon = new RemoteIconView(this,
                 on ? RemoteIconView.POWER_ON : RemoteIconView.POWER_OFF);
-        button.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        button.addView(icon, new LinearLayout.LayoutParams(dp(28), dp(28)));
 
-        TextView textView = centeredLabel(text, Color.rgb(30, 28, 31), 18);
+        TextView textView = centeredLabel(text, foreground, 16);
         textView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        textParams.setMargins(dp(12), 0, 0, 0);
+        textParams.setMargins(dp(9), 0, 0, 0);
         button.addView(textView, textParams);
         setRemoteAction(button, label, commands);
         return button;
@@ -832,19 +812,30 @@ public final class MainActivity extends Activity {
         row.addView(right, rightParams);
     }
 
+    private void addRemotePairButtons(LinearLayout row, View left, View right) {
+        LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(
+                0, dp(72), 1);
+        leftParams.setMargins(0, 0, dp(6), 0);
+        row.addView(left, leftParams);
+        LinearLayout.LayoutParams rightParams = new LinearLayout.LayoutParams(
+                0, dp(72), 1);
+        rightParams.setMargins(dp(6), 0, 0, 0);
+        row.addView(right, rightParams);
+    }
+
     private LinearLayout sceneButton(String text, int iconType, String label,
             int[][] commands, int background, int textColor) {
         LinearLayout button = new LinearLayout(this);
         button.setOrientation(LinearLayout.HORIZONTAL);
         button.setGravity(Gravity.CENTER);
         button.setBackground(touchBackground(background,
-                blendWithWhite(background), 16));
+                blendWithWhite(background), 20));
         button.setClickable(true);
         button.setFocusable(true);
         button.setContentDescription(text);
 
         RemoteIconView icon = new RemoteIconView(this, iconType);
-        button.addView(icon, new LinearLayout.LayoutParams(dp(25), dp(25)));
+        button.addView(icon, new LinearLayout.LayoutParams(dp(28), dp(28)));
         TextView textView = centeredLabel(text, textColor, 16);
         textView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
@@ -957,7 +948,26 @@ public final class MainActivity extends Activity {
         view.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
                 requestRemoteSequence(label, commands);
+            }
+        });
+    }
+
+    private void setAlternatingRemoteAction(View view,
+            final String firstLabel, final int[][] firstCommands,
+            final String secondLabel, final int[][] secondCommands) {
+        final boolean[] sendFirst = {true};
+        view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                if (sendFirst[0]) {
+                    requestRemoteSequence(firstLabel, firstCommands);
+                } else {
+                    requestRemoteSequence(secondLabel, secondCommands);
+                }
+                sendFirst[0] = !sendFirst[0];
             }
         });
     }
@@ -1157,7 +1167,9 @@ public final class MainActivity extends Activity {
 
     private void startRemoteSequence(final String label, int[][] commands) {
         LightCommandDispatcher.sendSequence(this, label, commands);
-        statusView.setText("已触发“" + label + "”");
+        if (!SCREEN_CONTROL.equals(currentScreen)) {
+            statusView.setText("已触发“" + label + "”");
+        }
     }
 
     private void startLanApi() {

@@ -131,7 +131,7 @@ private final class LampCardController: NSWindowController {
 
     init() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 306),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 253),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -204,17 +204,16 @@ private final class LampCardController: NSWindowController {
             actionButton("调暗", "minus.circle.fill", NSColor(calibratedWhite: 0.48, alpha: 1), "brightness/down"),
             actionButton("调亮", "plus.circle.fill", .systemYellow, "brightness/up")
         ])
-        let temperature = makeRow([
-            actionButton("暖光", "sun.max.fill", .systemOrange, "temperature/warmer"),
-            actionButton("冷光", "snowflake", .systemBlue, "temperature/cooler")
-        ])
-        let preset = makeRow([
-            actionButton("全亮", "sun.max.circle.fill", .systemYellow, "preset/full"),
+        let modes = makeRow([
+            alternatingActionButton(
+                "冷光 / 暖光", "sun.max.fill", .systemOrange,
+                "temperature/warmer", "temperature/cooler"
+            ),
             actionButton(
-                "半亮",
+                "全亮 / 半亮",
                 "circle.lefthalf.filled",
                 NSColor(calibratedRed: 0.34, green: 0.31, blue: 0.46, alpha: 1),
-                "preset/half"
+                "preset/toggle"
             )
         ])
 
@@ -223,7 +222,7 @@ private final class LampCardController: NSWindowController {
         lastActionLabel.alignment = .center
         lastActionLabel.lineBreakMode = .byTruncatingTail
 
-        let content = NSStackView(views: [header, power, brightness, temperature, preset, lastActionLabel])
+        let content = NSStackView(views: [header, power, brightness, modes, lastActionLabel])
         content.orientation = .vertical
         content.alignment = .width
         content.spacing = 9
@@ -259,6 +258,25 @@ private final class LampCardController: NSWindowController {
             tint: tint
         ) { [weak self] in
             self?.onAction?(route)
+        }
+    }
+
+    private func alternatingActionButton(
+        _ title: String,
+        _ symbol: String,
+        _ tint: NSColor,
+        _ firstRoute: String,
+        _ secondRoute: String
+    ) -> ActionButton {
+        var sendFirst = true
+        return ActionButton(
+            title: title,
+            symbol: symbol,
+            fill: tint.withAlphaComponent(0.11),
+            tint: tint
+        ) { [weak self] in
+            self?.onAction?(sendFirst ? firstRoute : secondRoute)
+            sendFirst.toggle()
         }
     }
 
