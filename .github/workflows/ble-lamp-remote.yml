@@ -115,7 +115,10 @@ jobs:
             --arg releaseNotes "精简遥控器布局，将 LAN API 移至默认关闭的设置页，并加入安全的应用内更新。" \
             '{applicationId:$applicationId,versionCode:$versionCode,versionName:$versionName,downloadUrl:$downloadUrl,sha256:$sha256,signerSha256:$signerSha256,sizeBytes:$sizeBytes,releaseNotes:$releaseNotes}' \
             > release-assets/ble-lamp-remote-android.json
-          sha256sum "${apk}" > release-assets/SHA256SUMS
+          (
+            cd release-assets
+            sha256sum ble-lamp-remote-android.apk > SHA256SUMS
+          )
 
       - name: Upload signed Android release
         if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
