@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | [`aliyun-llm-proxy`](./aliyun-llm-proxy/) | macOS / Linux | OpenAI 兼容的阿里云百炼多模型代理，包含自动限流降级、本地统计页与 macOS 菜单栏应用 | 前端、Go 测试与 Universal macOS App |
 | [`macos-router-status-widget`](./macos-router-status-widget/) | macOS + OpenWrt | 展示 WAN、CPU、内存、温度及局域网设备实时流量，并提供受限重启操作的桌面小组件 | macOS构建产物与标签发布 |
+| [`ble-lamp-remote`](./ble-lamp-remote/) | Android + macOS | Android 通过 BLE 控制佛山照明灯具并提供可选 LAN API，macOS 桌面卡片负责远程控制 | 持续构建；标签发布签名 APK、更新清单与 macOS App |
 
 ## 新增项目约定
 

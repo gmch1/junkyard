@@ -15,6 +15,7 @@
 
 **/.build/
 **/build/
+**/.debug/
 **/dist/
 !aliyun-llm-proxy/dashboard/dist/
 !aliyun-llm-proxy/dashboard/dist/**
