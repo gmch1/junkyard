@@ -2,7 +2,7 @@
 
 可录制、可复用的本地 BLE 灯具遥控应用。Android 先从设备库选择已验证模板，或按引导录制一只实体遥控器；随后负责发送灯具实际响应的 BLE Manufacturer Advertising，并在可信局域网内提供固定动作 API。macOS 桌面卡片通过该 API 遥控灯具。
 
-灯控链路不需要云服务、厂商账号或互联网连接；只有主动检查应用更新时会访问 GitHub：
+Android 与 macOS 的本地灯控链路不需要云服务、厂商账号或互联网连接；只有主动检查应用更新时会访问 GitHub。可选的巴法云桥接独立部署，用于把米家/小爱命令转发到同一套局域网 API：
 
 ```text
 macOS 桌面卡片
@@ -40,8 +40,11 @@ Android 常驻 API（仅绑定私有 IPv4）
 ```text
 ble-lamp-remote/
 ├── android/   # 无 Gradle 依赖的原生 Java APK、BLE 协议与 LAN API
-└── macos/     # 纯 AppKit 桌面卡片
+├── macos/     # 纯 AppKit 桌面卡片
+└── bemfa-bridge/ # 可选的巴法云 MQTT TLS → Android LAN API 桥接
 ```
+
+巴法云桥接的配置、安全边界和 188 部署方式见 [`bemfa-bridge/README.md`](bemfa-bridge/README.md)。
 
 协议抓包和逐字段验证记录见 [`android/CAPTURE_RESULTS.md`](android/CAPTURE_RESULTS.md)。
 

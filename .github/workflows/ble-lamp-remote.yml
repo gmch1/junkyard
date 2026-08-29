@@ -118,11 +118,6 @@ jobs:
             --arg releaseNotes "精简遥控器布局，将 LAN API 移至默认关闭的设置页，并加入安全的应用内更新。" \
             '{applicationId:$applicationId,versionCode:$versionCode,versionName:$versionName,downloadUrl:$downloadUrl,sha256:$sha256,signerSha256:$signerSha256,sizeBytes:$sizeBytes,releaseNotes:$releaseNotes}' \
             > release-assets/ble-lamp-remote-android.json
-          (
-            cd release-assets
-            sha256sum ble-lamp-remote-android.apk > SHA256SUMS
-          )
-
       - name: Upload signed Android release
         if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
         uses: actions/upload-artifact@v6
@@ -167,12 +162,64 @@ jobs:
           path: ble-lamp-remote/macos/LampRemoteWidget-macos.zip
           if-no-files-found: error
 
+  bemfa-bridge:
+    name: Test and build Bemfa bridge
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ble-lamp-remote/bemfa-bridge
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ble-lamp-remote/bemfa-bridge/go.mod
+          cache-dependency-path: ble-lamp-remote/bemfa-bridge/go.sum
+
+      - name: Check formatting
+        run: |
+          go fmt ./...
+          git diff --exit-code -- .
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Build and validate Linux amd64 container
+        run: |
+          set -euo pipefail
+          image="localhost/bemfa-lamp-bridge:${GITHUB_SHA}"
+          docker build \
+            --platform linux/amd64 \
+            --file Containerfile \
+            --build-arg "VERSION=${GITHUB_SHA}" \
+            --tag "${image}" \
+            .
+          test "$(docker run --rm --network none "${image}" --version)" = "${GITHUB_SHA}"
+          test "$(docker image inspect --format '{{.Config.User}}' "${image}")" = "65532:65532"
+          mkdir -p build
+          docker save \
+            --output build/bemfa-lamp-bridge-linux-amd64.image.tar \
+            "${image}"
+
+      - name: Upload Linux bridge image
+        uses: actions/upload-artifact@v6
+        with:
+          name: ble-lamp-remote-bemfa-bridge-image
+          path: ble-lamp-remote/bemfa-bridge/build/bemfa-lamp-bridge-linux-amd64.image.tar
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/ble-lamp-remote-v')
     needs:
       - android
       - macos
+      - bemfa-bridge
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,6 +237,23 @@ jobs:
           name: ble-lamp-remote-macos
           path: release-assets
 
+      - name: Download Bemfa bridge release
+        uses: actions/download-artifact@v6
+        with:
+          name: ble-lamp-remote-bemfa-bridge-image
+          path: release-assets
+
+      - name: Generate release checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum \
+            ble-lamp-remote-android.apk \
+            ble-lamp-remote-android.json \
+            LampRemoteWidget-macos.zip \
+            bemfa-lamp-bridge-linux-amd64.image.tar \
+            > SHA256SUMS
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -200,6 +264,7 @@ jobs:
             release-assets/ble-lamp-remote-android.json
             release-assets/SHA256SUMS
             release-assets/LampRemoteWidget-macos.zip
+            release-assets/bemfa-lamp-bridge-linux-amd64.image.tar
           )
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
